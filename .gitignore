@@ -30,3 +30,6 @@ checkpoints/
 # OS
 .DS_Store
 Thumbs.db
+
+# Generated plots
+*.png
