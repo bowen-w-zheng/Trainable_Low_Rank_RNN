@@ -35,11 +35,11 @@ class TemporalDecisionTaskConfig:
     # Decision threshold
     theta: float = 0.0  # Threshold for Go/No-Go
 
-    # Label format
+    # Label format (legacy for compatibility)
     label_type: str = "binary"  # "binary" for {0, 1}, "pm1" for ±1
 
     # Loss type
-    loss_type: str = "bce"  # "bce" or "mse"
+    loss_type: str = "mse"  # "mse" for regression, "bce" for classification
 
     # Context sampling for train/test split
     # If None, sample uniformly from [0, 1]
@@ -50,15 +50,15 @@ class TemporalDecisionTaskConfig:
 
 class TemporalDecisionDataset:
     """
-    Dataset for the temporal decision task (Interpolating Go-No-Go).
+    Dataset for the temporal decision task (Evidence Integration Regression).
 
     Task description:
         - Two time-varying input features u1(t), u2(t)
         - Context cue c determines which feature is relevant
-        - Network outputs Go/No-Go based on context-weighted combination
-        - For c=0: only u1 matters
-        - For c=1: only u2 matters
-        - For intermediate c: linear mixture of u1 and u2
+        - Network outputs g_bar: the integrated evidence over stimulus window
+        - For c=0: only u1 matters, g_bar = mean(u1(t))
+        - For c=1: only u2 matters, g_bar = mean(u2(t))
+        - For intermediate c: linear mixture, g_bar = mean((1-c)*u1(t) + c*u2(t))
 
     Input channels (d_in = 3):
         - Channel 0: u1 (stimulus feature 1)
@@ -67,8 +67,8 @@ class TemporalDecisionDataset:
 
     Trial structure:
         - t in [0, t_stim_on): No stimulus, context present
-        - t in [t_stim_on, t_stim_off]: Stimulus window
-        - t in [t_response_on, t_response_off]: Response window
+        - t in [t_stim_on, t_stim_off]: Stimulus window (integrate evidence)
+        - t in [t_response_on, t_response_off]: Response window (output g_bar)
     """
 
     def __init__(
@@ -154,14 +154,14 @@ class TemporalDecisionDataset:
         g_stim = g[self.stim_on_idx:self.stim_off_idx]
         g_bar = jnp.mean(g_stim)
 
-        # Compute trial label
+        # Compute trial label (legacy, for compatibility)
         label = (g_bar > self.task_cfg.theta).astype(jnp.float32)
 
         if self.task_cfg.label_type == "pm1":
             label = 2 * label - 1  # Map 0 -> -1, 1 -> 1
 
-        # Build time-resolved target
-        y_time = self._build_target_sequence(label)
+        # Build time-resolved target (now uses g_bar instead of binary label)
+        y_time = self._build_target_sequence(g_bar)
 
         return {
             'times': self.times,
@@ -213,14 +213,14 @@ class TemporalDecisionDataset:
         g_stim = g[self.stim_on_idx:self.stim_off_idx]
         g_bar = jnp.mean(g_stim)
 
-        # Compute trial label
+        # Compute trial label (legacy, for compatibility)
         label = (g_bar > self.task_cfg.theta).astype(jnp.float32)
 
         if self.task_cfg.label_type == "pm1":
             label = 2 * label - 1
 
-        # Build time-resolved target
-        y_time = self._build_target_sequence(label)
+        # Build time-resolved target (now uses g_bar instead of binary label)
+        y_time = self._build_target_sequence(g_bar)
 
         return {
             'times': self.times,
@@ -272,22 +272,22 @@ class TemporalDecisionDataset:
 
         return u_seq
 
-    def _build_target_sequence(self, label: float) -> jnp.ndarray:
+    def _build_target_sequence(self, g_bar: float) -> jnp.ndarray:
         """
         Build time-resolved target sequence.
 
-        Target is 0 before/during stimulus, and label during response window.
+        Target is 0 before/during stimulus, and g_bar during response window.
 
         Args:
-            label: Trial label
+            g_bar: Integrated evidence (target value for regression)
 
         Returns:
             y_time: Target sequence (n_steps,)
         """
         y_time = jnp.zeros(self.n_steps)
 
-        # Set target in response window
-        y_time = y_time.at[self.response_on_idx:self.response_off_idx].set(label)
+        # Set target to g_bar in response window
+        y_time = y_time.at[self.response_on_idx:self.response_off_idx].set(g_bar)
 
         return y_time
 
@@ -425,26 +425,21 @@ def plot_single_trial(
 
     # Subplot 3: Target output
     ax3 = axes[2]
-    ax3.plot(times, y_time, 'k-', linewidth=2)
+    ax3.plot(times, y_time, 'k-', linewidth=2, label='Target')
     ax3.axvline(task_cfg.t_response_on, color='gray', linestyle='--', alpha=0.5)
     ax3.axvline(task_cfg.t_response_off, color='gray', linestyle='--', alpha=0.5)
+    ax3.axhline(g_bar, color='m', linestyle=':', alpha=0.7, linewidth=2,
+                label=f'g_bar={g_bar:.2f}')
     ax3.axvspan(task_cfg.t_stim_on, task_cfg.t_stim_off,
                 alpha=0.1, color='blue', label='Stimulus window')
     ax3.axvspan(task_cfg.t_response_on, task_cfg.t_response_off,
                 alpha=0.1, color='green', label='Response window')
-    ax3.set_ylabel('Target')
+    ax3.set_ylabel('Target (g_bar)')
     ax3.set_xlabel('Time (s)')
 
-    # Add decision annotation
-    decision = "Go" if label > 0.5 else "No-Go"
-    ax3.text(0.95, 0.5, decision, transform=ax3.transAxes,
-             fontsize=14, fontweight='bold', ha='right', va='center',
-             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-
     ax3.legend(loc='upper right')
-    ax3.set_title('Target Output')
+    ax3.set_title('Target Output (Integrated Evidence)')
     ax3.grid(True, alpha=0.3)
-    ax3.set_ylim(-0.1, 1.1)
 
     plt.tight_layout()
 
@@ -533,25 +528,24 @@ def plot_interpolation_comparison(
 
         # Row 3: Target
         ax3 = axes[2, col]
-        ax3.plot(times, y_time, 'k-', linewidth=2)
+        ax3.plot(times, y_time, 'k-', linewidth=2, label='Target')
+        ax3.axhline(g_bar, color='m', linestyle=':', alpha=0.7, linewidth=2)
         ax3.axvspan(task_cfg.t_stim_on, task_cfg.t_stim_off,
                     alpha=0.1, color='blue')
         ax3.axvspan(task_cfg.t_response_on, task_cfg.t_response_off,
                     alpha=0.1, color='green')
         if col == 0:
-            ax3.set_ylabel('Target')
+            ax3.set_ylabel('Target (g_bar)')
         ax3.set_xlabel('Time (s)')
 
-        # Add decision annotation
-        decision = "Go" if label > 0.5 else "No-Go"
-        ax3.text(0.5, 0.5, decision, transform=ax3.transAxes,
-                fontsize=12, fontweight='bold', ha='center', va='center',
+        # Add g_bar value annotation
+        ax3.text(0.5, 0.9, f'Target: {g_bar:.2f}', transform=ax3.transAxes,
+                fontsize=10, fontweight='bold', ha='center', va='top',
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-        ax3.set_ylim(-0.1, 1.1)
         ax3.grid(True, alpha=0.3)
 
     # Add overall title
-    fig.suptitle(f'Interpolating Go-No-Go Task (a1={a1:.2f}, a2={a2:.2f})',
+    fig.suptitle(f'Evidence Integration Regression Task (a1={a1:.2f}, a2={a2:.2f})',
                  fontsize=14, fontweight='bold')
 
     plt.tight_layout()

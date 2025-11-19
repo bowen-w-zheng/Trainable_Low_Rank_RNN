@@ -56,7 +56,7 @@ task:
   sigma2: 1.0
   input_noise_std: 0.2
   theta: 0.0
-  label_type: binary
-  loss_type: bce
+  label_type: binary  # Legacy field, not used for regression
+  loss_type: mse  # MSE loss for regression
   train_contexts: [0.0, 0.25, 0.5, 0.75, 1.0]
   test_contexts: [0.125, 0.375, 0.625, 0.875]

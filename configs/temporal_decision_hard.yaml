@@ -56,8 +56,8 @@ task:
   sigma2: 1.0
   input_noise_std: 0.2  # Add temporal noise to inputs
   theta: 0.0
-  label_type: binary
-  loss_type: bce
+  label_type: binary  # Legacy field, not used for regression
+  loss_type: mse  # MSE loss for regression
   # Train on discrete contexts, test on held-out intermediate values
   train_contexts: [0.0, 0.33, 0.66, 1.0]
   test_contexts: [0.125, 0.375, 0.625, 0.875]
