@@ -55,5 +55,5 @@ task:
   mu2: 0.0
   sigma2: 1.0
   theta: 0.0
-  label_type: binary
-  loss_type: bce
+  label_type: binary  # Legacy field, not used for regression
+  loss_type: mse  # MSE loss for regression
