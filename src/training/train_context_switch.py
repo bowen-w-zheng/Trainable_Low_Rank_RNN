@@ -18,12 +18,19 @@ from src.training.losses import compute_trial_output, compute_trial_loss, l2_reg
 from src.training.metrics import compute_accuracy, compute_context_accuracy
 
 
-def create_optimizer(cfg) -> optax.GradientTransformation:
-    """Create optimizer based on config."""
+def create_optimizer(cfg, n_iterations: int) -> optax.GradientTransformation:
+    """Create optimizer with learning rate schedule."""
+    # Cosine decay schedule
+    schedule = optax.cosine_decay_schedule(
+        init_value=cfg.learning_rate,
+        decay_steps=n_iterations,
+        alpha=0.01  # Final LR = 1% of initial
+    )
+
     if cfg.optimizer == "adam":
-        opt = optax.adam(cfg.learning_rate)
+        opt = optax.adam(schedule)
     elif cfg.optimizer == "adamw":
-        opt = optax.adamw(cfg.learning_rate, weight_decay=cfg.weight_decay)
+        opt = optax.adamw(schedule, weight_decay=cfg.weight_decay)
     else:
         raise ValueError(f"Unknown optimizer: {cfg.optimizer}")
 
@@ -37,7 +44,7 @@ def create_optimizer(cfg) -> optax.GradientTransformation:
     return opt
 
 
-def make_train_step(model, dataset, cfg):
+def make_train_step(model, dataset, cfg, n_iterations: int):
     """
     Create the training step function.
 
@@ -47,6 +54,9 @@ def make_train_step(model, dataset, cfg):
     dt = cfg.integrator.dt
     loss_type = cfg.task.loss_type
     label_type = cfg.task.label_type
+
+    # Create optimizer with schedule
+    optimizer = create_optimizer(cfg.training, n_iterations)
 
     def loss_fn(trainable_params, fixed_params, batch):
         """Compute loss for a batch."""
@@ -94,7 +104,6 @@ def make_train_step(model, dataset, cfg):
 
         return trainable_params, opt_state, metrics
 
-    optimizer = create_optimizer(cfg.training)
     return jax.jit(train_step), optimizer
 
 
@@ -193,8 +202,11 @@ def train(cfg: ExperimentConfig, verbose: bool = True):
         fixed_params['w'] = params.w
         fixed_params['b'] = params.b
 
+    # Compute number of iterations
+    n_iterations = cfg.training.n_train_trials // cfg.training.batch_size
+
     # Create training and evaluation functions
-    train_step, optimizer = make_train_step(model, dataset, cfg)
+    train_step, optimizer = make_train_step(model, dataset, cfg, n_iterations)
     eval_step = make_eval_step(model, dataset, cfg)
 
     # Initialize optimizer state
@@ -211,12 +223,15 @@ def train(cfg: ExperimentConfig, verbose: bool = True):
         'iteration': [],
     }
 
-    # Compute number of iterations
-    n_iterations = cfg.training.n_train_trials // cfg.training.batch_size
-
     if verbose:
         print(f"Starting training for {n_iterations} iterations")
         print(f"  batch_size={cfg.training.batch_size}, lr={cfg.training.learning_rate}")
+        print(f"  Using cosine LR schedule: {cfg.training.learning_rate} -> {cfg.training.learning_rate * 0.01}")
+
+    # Running averages for stable logging
+    running_loss = 0.0
+    running_acc = 0.0
+    running_count = 0
 
     # Training loop
     for i in range(n_iterations):
@@ -229,15 +244,29 @@ def train(cfg: ExperimentConfig, verbose: bool = True):
             trainable_params, fixed_params, opt_state, batch
         )
 
+        # Update running averages
+        running_loss += float(metrics['loss'])
+        running_acc += float(metrics['accuracy'])
+        running_count += 1
+
         # Logging
         if (i + 1) % cfg.training.log_every == 0:
-            logs['train_loss'].append(float(metrics['loss']))
-            logs['train_accuracy'].append(float(metrics['accuracy']))
+            avg_loss = running_loss / running_count
+            avg_acc = running_acc / running_count
+
+            logs['train_loss'].append(avg_loss)
+            logs['train_accuracy'].append(avg_acc)
             logs['iteration'].append(i + 1)
 
             if verbose:
                 print(f"Iter {i+1}/{n_iterations}: "
-                      f"loss={metrics['loss']:.4f}, acc={metrics['accuracy']:.3f}")
+                      f"loss={avg_loss:.4f}, acc={avg_acc:.3f} "
+                      f"(last={metrics['loss']:.4f}, {metrics['accuracy']:.3f})")
+
+            # Reset running averages
+            running_loss = 0.0
+            running_acc = 0.0
+            running_count = 0
 
         # Evaluation
         if (i + 1) % cfg.training.eval_every == 0:

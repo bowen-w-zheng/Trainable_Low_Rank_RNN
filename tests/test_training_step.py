@@ -26,7 +26,7 @@ class TestCreateOptimizer:
         cfg.training.optimizer = "adam"
         cfg.training.learning_rate = 0.001
 
-        opt = create_optimizer(cfg.training)
+        opt = create_optimizer(cfg.training, n_iterations=100)
         assert opt is not None
 
     def test_adamw_optimizer(self):
@@ -34,7 +34,7 @@ class TestCreateOptimizer:
         cfg = ExperimentConfig()
         cfg.training.optimizer = "adamw"
 
-        opt = create_optimizer(cfg.training)
+        opt = create_optimizer(cfg.training, n_iterations=100)
         assert opt is not None
 
     def test_unknown_optimizer(self):
@@ -43,7 +43,7 @@ class TestCreateOptimizer:
         cfg.training.optimizer = "unknown"
 
         with pytest.raises(ValueError):
-            create_optimizer(cfg.training)
+            create_optimizer(cfg.training, n_iterations=100)
 
 
 class TestMakeTrainStep:
@@ -72,7 +72,8 @@ class TestMakeTrainStep:
         dataset = create_dataset(cfg.task, cfg.integrator, data_key)
 
         # Create train step
-        train_step, optimizer = make_train_step(model, dataset, cfg)
+        n_iterations = 100
+        train_step, optimizer = make_train_step(model, dataset, cfg, n_iterations)
 
         # Set up parameters
         trainable_params = {
@@ -118,7 +119,8 @@ class TestMakeTrainStep:
         key, data_key = jax.random.split(key)
         dataset = create_dataset(cfg.task, cfg.integrator, data_key)
 
-        train_step, optimizer = make_train_step(model, dataset, cfg)
+        n_iterations = 100
+        train_step, optimizer = make_train_step(model, dataset, cfg, n_iterations)
 
         trainable_params = {
             'M': params.M,
