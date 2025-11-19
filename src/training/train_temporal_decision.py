@@ -286,8 +286,9 @@ def plot_network_performance(
         ax2.axvline(task_cfg.t_response_on, color='gray', linestyle='--', alpha=0.5)
         ax2.axvline(task_cfg.t_response_off, color='gray', linestyle='--', alpha=0.5)
         ax2.axvspan(task_cfg.t_response_on, task_cfg.t_response_off, alpha=0.1, color='green')
-        ax2.set_ylabel('Activity / Output')
-        ax2.legend(loc='upper right', fontsize=8)
+        ax2.set_ylabel('Activity')
+        ax2.set_ylim(-1.2, 1.2)
+        ax2.legend(loc='lower right', fontsize=8)
         ax2.grid(True, alpha=0.3)
         ax2.set_title(f'{n_neurons} neurons + readout')
 
