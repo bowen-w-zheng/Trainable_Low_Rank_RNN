@@ -2,7 +2,7 @@ name: contextual_switch_full_rank
 description: Full network training for contextual switch task (train entire J matrix)
 
 rnn:
-  N: 500
+  N: 20
   R: 2
   g: 0.8
   tau: 1.0
@@ -24,15 +24,15 @@ integrator:
   atol: 1.0e-06
 
 training:
-  batch_size: 32
+  batch_size: 256
   n_epochs: 100
   learning_rate: 0.001
   weight_decay: 0.0
   seed: 42
   log_every: 10
-  eval_every: 100
-  n_train_trials: 10000
-  n_val_trials: 500
+  eval_every: 50
+  n_train_trials: 50000
+  n_val_trials: 200
   optimizer: adam
   grad_clip: 1.0
   # Full rank training mode - trains entire J matrix directly

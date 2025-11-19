@@ -2,7 +2,7 @@ name: contextual_switch_stable
 description: Stable training configuration with learning rate schedule
 
 rnn:
-  N: 500
+  N: 100
   R: 2
   g: 0.8
   tau: 1.0
@@ -23,13 +23,13 @@ integrator:
   atol: 1.0e-06
 
 training:
-  batch_size: 128
+  batch_size: 64
   n_epochs: 100
-  learning_rate: 0.005
+  learning_rate: 0.001
   weight_decay: 0.0
   seed: 42
   log_every: 10
-  eval_every: 50
+  eval_every: 200
   n_train_trials: 100000
   n_val_trials: 2000
   optimizer: adam
