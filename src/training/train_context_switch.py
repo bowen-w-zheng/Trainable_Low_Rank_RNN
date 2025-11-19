@@ -387,7 +387,10 @@ def main():
 
     if not args.quiet:
         print(f"\nResults saved to {output_dir}")
-        print(f"Final validation accuracy: {logs['val_accuracy'][-1]:.3f}")
+        if logs['val_accuracy']:
+            print(f"Final validation accuracy: {logs['val_accuracy'][-1]:.3f}")
+        else:
+            print("No validation evaluations were performed (try increasing n_train_trials or decreasing eval_every)")
 
 
 if __name__ == '__main__':
