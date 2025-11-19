@@ -3,7 +3,7 @@ description: Harder configuration with noise and held-out contexts for generaliz
 
 rnn:
   N: 500
-  R: 2
+  R: 4
   g: 2
   tau: 0.1
   phi: tanh
@@ -45,11 +45,11 @@ training:
 
 task:
   dt: 0.01
-  T_trial: 1.0
+  T_trial: 1.5
   t_stim_on: 0.2
   t_stim_off: 0.7
-  t_response_on: 0.8
-  t_response_off: 1.0
+  t_response_on: 1.0
+  t_response_off: 1.5
   mu1: 0.0
   sigma1: 1.0
   mu2: 0.0

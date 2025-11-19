@@ -209,7 +209,7 @@ def make_trial_output_fn(model, dataset, task_cfg):
 
 def plot_network_performance(
     model, trainable_params, fixed_params, dataset, task_cfg, epoch,
-    output_dir, key, n_trials=5, n_neurons=10
+    output_dir, key, n_trials=5, n_neurons=20
 ):
     """
     Plot network performance on sample trials.
@@ -297,7 +297,7 @@ def plot_network_performance(
         ax2.axvline(task_cfg.t_response_off, color='gray', linestyle='--', alpha=0.5)
         ax2.axvspan(task_cfg.t_response_on, task_cfg.t_response_off, alpha=0.1, color='green')
         ax2.set_ylabel('Activity')
-        ax2.set_ylim(-1.2, 1.2)
+        ax2.set_ylim(-1.5, 1.5)
         ax2.legend(loc='lower right', fontsize=8)
         ax2.grid(True, alpha=0.3)
         ax2.set_title(f'{n_neurons} neurons + readout')
@@ -314,6 +314,8 @@ def plot_network_performance(
         ax3.plot(resp_times, y_pred_np[resp_start:resp_end], 'b-', label='Readout', linewidth=2.5)
         ax3.axhline(g_bar, color='m', linestyle=':', alpha=0.7, linewidth=2, label=f'g_bar={g_bar:.2f}')
         ax3.set_ylabel('Output (g_bar)')
+        # set ylim to -1.5, 1.5
+        ax3.set_ylim(-1.5, 1.5)
         ax3.set_xlabel('Time (s)')
 
         ax3.set_title(f'Target: {g_bar:.2f} | Pred: {pred_val:.2f} | Error: {error:.2f}')
