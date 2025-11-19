@@ -226,10 +226,19 @@ def plot_network_performance(
     Plot network performance on sample trials.
 
     Shows network output vs ground truth target for n_trials.
+    If test_contexts is defined, shows trials from both train and test contexts.
     """
     get_trial_outputs = make_trial_output_fn(model, dataset, task_cfg)
 
-    # Sample trials
+    # Determine how to split trials between train and test contexts
+    has_test_contexts = task_cfg.test_contexts is not None
+    if has_test_contexts:
+        n_train_trials = (n_trials + 1) // 2  # First half from train
+        n_test_trials = n_trials - n_train_trials  # Second half from test
+    else:
+        n_train_trials = n_trials
+        n_test_trials = 0
+
     keys = jax.random.split(key, n_trials)
 
     fig, axes = plt.subplots(n_trials, 3, figsize=(15, 3 * n_trials))
@@ -237,7 +246,13 @@ def plot_network_performance(
         axes = axes.reshape(1, -1)
 
     for i in range(n_trials):
-        trial = dataset.sample_trial(keys[i])
+        # Sample from train or test contexts
+        if i < n_train_trials:
+            trial = dataset.sample_trial(keys[i], use_test_contexts=False)
+            context_type = "TRAIN"
+        else:
+            trial = dataset.sample_trial(keys[i], use_test_contexts=True)
+            context_type = "HELD-OUT"
 
         # Get network output
         y_pred = get_trial_outputs(trainable_params, fixed_params, trial['u_seq'])
@@ -259,7 +274,12 @@ def plot_network_performance(
         ax1.axvline(task_cfg.t_stim_on, color='gray', linestyle='--', alpha=0.5)
         ax1.axvline(task_cfg.t_stim_off, color='gray', linestyle='--', alpha=0.5)
         ax1.set_ylabel('Input')
-        ax1.set_title(f'Trial {i+1}: c={context:.2f}, a1={a1:.2f}, a2={a2:.2f}')
+
+        # Title with context type
+        if has_test_contexts:
+            ax1.set_title(f'[{context_type}] c={context:.3f}, a1={a1:.2f}, a2={a2:.2f}')
+        else:
+            ax1.set_title(f'Trial {i+1}: c={context:.2f}, a1={a1:.2f}, a2={a2:.2f}')
         ax1.legend(loc='upper right', fontsize=8)
         ax1.grid(True, alpha=0.3)
 
@@ -296,7 +316,14 @@ def plot_network_performance(
         ax3.legend(loc='upper right', fontsize=8)
         ax3.grid(True, alpha=0.3)
 
-    fig.suptitle(f'Network Performance - Epoch {epoch}', fontsize=14, fontweight='bold')
+    # Create title with context info
+    title = f'Network Performance - Epoch {epoch}'
+    if has_test_contexts:
+        train_ctx_str = ', '.join([f'{c:.2f}' for c in task_cfg.train_contexts])
+        test_ctx_str = ', '.join([f'{c:.2f}' for c in task_cfg.test_contexts])
+        title += f'\nTrain contexts: [{train_ctx_str}] | Held-out: [{test_ctx_str}]'
+
+    fig.suptitle(title, fontsize=12, fontweight='bold')
     plt.tight_layout()
 
     # Save plot
