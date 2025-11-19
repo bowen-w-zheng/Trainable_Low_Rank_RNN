@@ -86,10 +86,15 @@ def make_train_step(model, dataset, rnn_cfg, task_cfg, training_cfg, n_iteration
 
         def single_trial(u_seq, target):
             _, ys = model.simulate_trial_fast(params, u_seq, dt)
-            y_hat = jnp.mean(ys[resp_start:resp_end])
 
-            # MSE loss for regression (target is now g_bar, not binary label)
-            loss = (y_hat - target) ** 2
+            # Get outputs during response window
+            y_resp = ys[resp_start:resp_end]
+
+            # MSE loss: compute error at each time point in response window, then average
+            loss = jnp.mean((y_resp - target) ** 2)
+
+            # Return mean prediction for evaluation
+            y_hat = jnp.mean(y_resp)
 
             return y_hat, loss
 
@@ -135,10 +140,15 @@ def make_eval_step(model, dataset, rnn_cfg, task_cfg):
 
         def single_trial(u_seq, target, context):
             _, ys = model.simulate_trial_fast(params, u_seq, dt)
-            y_hat = jnp.mean(ys[resp_start:resp_end])
 
-            # MSE loss for regression
-            loss = (y_hat - target) ** 2
+            # Get outputs during response window
+            y_resp = ys[resp_start:resp_end]
+
+            # MSE loss: compute error at each time point in response window, then average
+            loss = jnp.mean((y_resp - target) ** 2)
+
+            # Return mean prediction for evaluation
+            y_hat = jnp.mean(y_resp)
 
             return y_hat, loss
 
