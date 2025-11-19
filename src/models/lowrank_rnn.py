@@ -1,22 +1,27 @@
 """Low-rank recurrent neural network model."""
 
-from typing import Dict, Tuple, Any, NamedTuple
+from typing import Dict, Tuple, Any, NamedTuple, Optional
 import jax
 import jax.numpy as jnp
 from functools import partial
 
-from src.config import RNNConfig, IntegratorConfig
+from src.config import RNNConfig, IntegratorConfig, TrainingConfig
 from src.models.integrators import integrate_rnn_dynamics, make_input_interpolator
 
 
 class RNNParams(NamedTuple):
-    """Parameters for the low-rank RNN."""
-    C: jnp.ndarray  # Fixed random bulk connectivity (N, N)
-    M: jnp.ndarray  # Trainable low-rank factor (N, R)
-    N_lr: jnp.ndarray  # Trainable low-rank factor (N, R) - named N_lr to avoid confusion
+    """Parameters for the low-rank RNN.
+
+    In low_rank mode: J = g*C + (1/N)*M @ N_lr^T (C fixed, M/N_lr trainable)
+    In full_rank mode: J is directly trainable (N, N) matrix
+    """
+    C: jnp.ndarray  # Fixed random bulk connectivity (N, N) - used in low_rank mode
+    M: jnp.ndarray  # Trainable low-rank factor (N, R) - used in low_rank mode
+    N_lr: jnp.ndarray  # Trainable low-rank factor (N, R) - used in low_rank mode
     B: jnp.ndarray  # Input projection (N, d_in)
     w: jnp.ndarray  # Readout weights (N,)
     b: jnp.ndarray  # Readout bias (scalar)
+    J: Optional[jnp.ndarray] = None  # Full connectivity matrix (N, N) - used in full_rank mode
 
 
 class LowRankRNN:
@@ -34,13 +39,14 @@ class LowRankRNN:
         - Output: y = (1/N) * w^T @ phi(x) + b
     """
 
-    def __init__(self, cfg: RNNConfig, key: jax.random.PRNGKey):
+    def __init__(self, cfg: RNNConfig, key: jax.random.PRNGKey, training_mode: str = "low_rank"):
         """
         Initialize the low-rank RNN.
 
         Args:
             cfg: RNN configuration
             key: JAX random key for initialization
+            training_mode: "low_rank" or "full_rank"
         """
         self.cfg = cfg
         self.N = cfg.N
@@ -48,13 +54,14 @@ class LowRankRNN:
         self.g = cfg.g
         self.tau = cfg.tau
         self.d_in = cfg.d_in
+        self.training_mode = training_mode
 
         # Initialize parameters
         self.params = self._init_params(key)
 
     def _init_params(self, key: jax.random.PRNGKey) -> RNNParams:
         """Initialize network parameters."""
-        keys = jax.random.split(key, 6)
+        keys = jax.random.split(key, 7)
 
         # Fixed random bulk connectivity: C ~ N(0, 1/sqrt(N))
         # Following paper convention for proper spectral scaling
@@ -74,7 +81,14 @@ class LowRankRNN:
         # Readout bias
         b = jnp.zeros(())
 
-        return RNNParams(C=C, M=M, N_lr=N_lr, B=B, w=w, b=b)
+        # Full connectivity matrix for full_rank mode
+        # Initialize as J ~ N(0, g * J_init_std / sqrt(N))
+        if self.training_mode == "full_rank":
+            J = jax.random.normal(keys[6], (self.N, self.N)) * self.g * self.cfg.J_init_std / jnp.sqrt(self.N)
+        else:
+            J = None
+
+        return RNNParams(C=C, M=M, N_lr=N_lr, B=B, w=w, b=b, J=J)
 
     @staticmethod
     def phi(x: jnp.ndarray) -> jnp.ndarray:
@@ -82,13 +96,17 @@ class LowRankRNN:
         return jnp.tanh(x)
 
     @staticmethod
-    def compute_J(params: RNNParams, g: float, N: int) -> jnp.ndarray:
+    def compute_J(params: RNNParams, g: float, N: int, training_mode: str = "low_rank") -> jnp.ndarray:
         """
         Compute effective connectivity matrix.
 
-        J = g * C + (1/N) * M @ N^T
+        In low_rank mode: J = g * C + (1/N) * M @ N^T
+        In full_rank mode: J is directly returned from params
         """
-        return g * params.C + (1.0 / N) * params.M @ params.N_lr.T
+        if training_mode == "full_rank" and params.J is not None:
+            return params.J
+        else:
+            return g * params.C + (1.0 / N) * params.M @ params.N_lr.T
 
     def rhs(self, t: float, x: jnp.ndarray, args: Tuple) -> jnp.ndarray:
         """
@@ -110,7 +128,7 @@ class LowRankRNN:
         u_t = u_of_t(t)
 
         # Compute J matrix
-        J = self.compute_J(params, self.g, self.N)
+        J = self.compute_J(params, self.g, self.N, self.training_mode)
 
         # Compute activation
         r = self.phi(x)
@@ -204,7 +222,7 @@ class LowRankRNN:
         T = u_seq.shape[0]
 
         # Compute J matrix once
-        J = self.compute_J(params, self.g, self.N)
+        J = self.compute_J(params, self.g, self.N, self.training_mode)
 
         def step_fn(x, u_t):
             """One Euler step."""
@@ -222,7 +240,7 @@ class LowRankRNN:
 
         return xs, ys
 
-    def get_trainable_params(self, params: RNNParams, training_cfg) -> Dict[str, jnp.ndarray]:
+    def get_trainable_params(self, params: RNNParams, training_cfg: TrainingConfig) -> Dict[str, jnp.ndarray]:
         """
         Get dictionary of trainable parameters.
 
@@ -234,10 +252,19 @@ class LowRankRNN:
             Dictionary of trainable parameters
         """
         trainable = {}
-        if training_cfg.train_M:
-            trainable['M'] = params.M
-        if training_cfg.train_N:
-            trainable['N_lr'] = params.N_lr
+
+        if training_cfg.training_mode == "full_rank":
+            # In full_rank mode, train J directly
+            if params.J is not None:
+                trainable['J'] = params.J
+        else:
+            # In low_rank mode, train M and N_lr
+            if training_cfg.train_M:
+                trainable['M'] = params.M
+            if training_cfg.train_N:
+                trainable['N_lr'] = params.N_lr
+
+        # B and w are trainable in both modes
         if training_cfg.train_B:
             trainable['B'] = params.B
         if training_cfg.train_w:
@@ -249,7 +276,7 @@ class LowRankRNN:
         self,
         params: RNNParams,
         trainable_updates: Dict[str, jnp.ndarray],
-        training_cfg
+        training_cfg: TrainingConfig
     ) -> RNNParams:
         """
         Update parameters with new trainable values.
@@ -262,18 +289,28 @@ class LowRankRNN:
         Returns:
             Updated parameter set
         """
-        M = trainable_updates.get('M', params.M) if training_cfg.train_M else params.M
-        N_lr = trainable_updates.get('N_lr', params.N_lr) if training_cfg.train_N else params.N_lr
+        if training_cfg.training_mode == "full_rank":
+            # In full_rank mode, update J directly
+            J = trainable_updates.get('J', params.J)
+            M = params.M
+            N_lr = params.N_lr
+        else:
+            # In low_rank mode, update M and N_lr
+            M = trainable_updates.get('M', params.M) if training_cfg.train_M else params.M
+            N_lr = trainable_updates.get('N_lr', params.N_lr) if training_cfg.train_N else params.N_lr
+            J = params.J
+
         B = trainable_updates.get('B', params.B) if training_cfg.train_B else params.B
         w = trainable_updates.get('w', params.w) if training_cfg.train_w else params.w
         b = trainable_updates.get('b', params.b) if training_cfg.train_w else params.b
 
-        return RNNParams(C=params.C, M=M, N_lr=N_lr, B=B, w=w, b=b)
+        return RNNParams(C=params.C, M=M, N_lr=N_lr, B=B, w=w, b=b, J=J)
 
 
 def create_rnn_and_params(
     cfg: RNNConfig,
-    key: jax.random.PRNGKey
+    key: jax.random.PRNGKey,
+    training_mode: str = "low_rank"
 ) -> Tuple[LowRankRNN, RNNParams]:
     """
     Create RNN model and initial parameters.
@@ -281,32 +318,48 @@ def create_rnn_and_params(
     Args:
         cfg: RNN configuration
         key: Random key
+        training_mode: "low_rank" or "full_rank"
 
     Returns:
         model: LowRankRNN instance
         params: Initial parameters
     """
-    model = LowRankRNN(cfg, key)
+    model = LowRankRNN(cfg, key, training_mode)
     return model, model.params
 
 
-def count_parameters(params: RNNParams, trainable_only: bool = True) -> int:
+def count_parameters(params: RNNParams, trainable_only: bool = True, training_mode: str = "low_rank") -> int:
     """
     Count number of parameters.
 
     Args:
         params: Network parameters
-        trainable_only: If True, exclude C (fixed bulk)
+        trainable_only: If True, exclude fixed parameters
+        training_mode: "low_rank" or "full_rank"
 
     Returns:
         Total number of parameters
     """
     total = 0
-    if not trainable_only:
-        total += params.C.size
-    total += params.M.size
-    total += params.N_lr.size
+
+    if training_mode == "full_rank":
+        # In full_rank mode, J is trainable
+        if params.J is not None:
+            total += params.J.size
+        if not trainable_only:
+            total += params.C.size
+            total += params.M.size
+            total += params.N_lr.size
+    else:
+        # In low_rank mode, M and N_lr are trainable, C is fixed
+        if not trainable_only:
+            total += params.C.size
+        total += params.M.size
+        total += params.N_lr.size
+
+    # B, w, b are always counted
     total += params.B.size
     total += params.w.size
     total += params.b.size
+
     return total

@@ -68,6 +68,7 @@ def make_train_step(model, dataset, cfg, n_iterations: int):
             B=trainable_params.get('B', fixed_params.get('B', None)),
             w=trainable_params.get('w', fixed_params.get('w', None)),
             b=trainable_params.get('b', fixed_params.get('b', jnp.zeros(()))),
+            J=trainable_params.get('J', fixed_params.get('J', None)),
         )
 
         def single_trial(u_seq, label):
@@ -123,6 +124,7 @@ def make_eval_step(model, dataset, cfg):
             B=trainable_params.get('B', fixed_params.get('B', None)),
             w=trainable_params.get('w', fixed_params.get('w', None)),
             b=trainable_params.get('b', fixed_params.get('b', jnp.zeros(()))),
+            J=trainable_params.get('J', fixed_params.get('J', None)),
         )
 
         def single_trial(u_seq, label):
@@ -160,14 +162,16 @@ def train(cfg: ExperimentConfig, verbose: bool = True):
     # Set random seed
     key = jax.random.PRNGKey(cfg.training.seed)
 
-    # Create model
+    # Create model with training mode
+    training_mode = cfg.training.training_mode
     key, model_key = jax.random.split(key)
-    model, params = create_rnn_and_params(cfg.rnn, model_key)
+    model, params = create_rnn_and_params(cfg.rnn, model_key, training_mode)
 
     if verbose:
-        n_params = count_parameters(params, trainable_only=True)
+        n_params = count_parameters(params, trainable_only=True, training_mode=training_mode)
         print(f"Model created with {n_params} trainable parameters")
         print(f"  N={cfg.rnn.N}, R={cfg.rnn.R}, g={cfg.rnn.g}")
+        print(f"  Training mode: {training_mode}")
 
     # Create dataset
     key, data_key = jax.random.split(key)
@@ -176,19 +180,28 @@ def train(cfg: ExperimentConfig, verbose: bool = True):
     if verbose:
         print(f"Dataset created with {dataset.n_steps} time steps per trial")
 
-    # Split params into trainable and fixed
+    # Split params into trainable and fixed based on training mode
     trainable_params = {}
     fixed_params = {'C': params.C}
 
-    if cfg.training.train_M:
-        trainable_params['M'] = params.M
-    else:
+    if training_mode == "full_rank":
+        # In full_rank mode, train J directly
+        if params.J is not None:
+            trainable_params['J'] = params.J
+        # M and N_lr are not used in full_rank mode but keep them in fixed
         fixed_params['M'] = params.M
-
-    if cfg.training.train_N:
-        trainable_params['N_lr'] = params.N_lr
-    else:
         fixed_params['N_lr'] = params.N_lr
+    else:
+        # In low_rank mode, train M and N_lr
+        if cfg.training.train_M:
+            trainable_params['M'] = params.M
+        else:
+            fixed_params['M'] = params.M
+
+        if cfg.training.train_N:
+            trainable_params['N_lr'] = params.N_lr
+        else:
+            fixed_params['N_lr'] = params.N_lr
 
     if cfg.training.train_B:
         trainable_params['B'] = params.B
@@ -297,6 +310,7 @@ def train(cfg: ExperimentConfig, verbose: bool = True):
         B=trainable_params.get('B', fixed_params.get('B')),
         w=trainable_params.get('w', fixed_params.get('w')),
         b=trainable_params.get('b', fixed_params.get('b', jnp.zeros(()))),
+        J=trainable_params.get('J', fixed_params.get('J', None)),
     )
 
     return final_params, logs, model
@@ -330,6 +344,10 @@ def save_results(params: RNNParams, logs: dict, cfg: ExperimentConfig, output_di
         'w': params.w.tolist(),
         'b': float(params.b),
     }
+    # Include J if it exists (full_rank mode)
+    if params.J is not None:
+        params_dict['J'] = params.J.tolist()
+
     with open(os.path.join(output_dir, 'params.pkl'), 'wb') as f:
         pickle.dump(params_dict, f)
 
