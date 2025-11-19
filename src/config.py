@@ -21,6 +21,7 @@ class RNNConfig:
     N_init_std: float = 1.0  # Std for N initialization
     B_init_std: float = 1.0  # Std for B initialization
     w_init_std: float = 1.0  # Std for w initialization
+    J_init_std: float = 1.0  # Std for full J initialization (full_rank mode)
 
 
 @dataclass
@@ -51,7 +52,12 @@ class TrainingConfig:
     optimizer: str = "adam"  # adam or adamw
     grad_clip: float = 1.0  # Gradient clipping norm
 
-    # What to train
+    # Training mode: "low_rank" or "full_rank"
+    # - low_rank: Train only M, N (low-rank factors), C is fixed
+    # - full_rank: Train the entire J connectivity matrix directly
+    training_mode: str = "low_rank"
+
+    # What to train (used in low_rank mode)
     train_M: bool = True
     train_N: bool = True
     train_B: bool = True
@@ -129,6 +135,7 @@ class ExperimentConfig:
                 'N_init_std': self.rnn.N_init_std,
                 'B_init_std': self.rnn.B_init_std,
                 'w_init_std': self.rnn.w_init_std,
+                'J_init_std': self.rnn.J_init_std,
             },
             'integrator': {
                 'dt': self.integrator.dt,
@@ -150,6 +157,7 @@ class ExperimentConfig:
                 'n_val_trials': self.training.n_val_trials,
                 'optimizer': self.training.optimizer,
                 'grad_clip': self.training.grad_clip,
+                'training_mode': self.training.training_mode,
                 'train_M': self.training.train_M,
                 'train_N': self.training.train_N,
                 'train_B': self.training.train_B,

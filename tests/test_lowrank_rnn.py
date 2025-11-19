@@ -249,3 +249,143 @@ class TestLowRankRNNGradients:
         assert grads['M'].shape == params.M.shape
         assert not jnp.any(jnp.isnan(grads['M']))
         assert not jnp.any(jnp.isnan(grads['N_lr']))
+
+
+class TestFullRankRNN:
+    """Tests for full-rank RNN training mode."""
+
+    def test_full_rank_init(self):
+        """Test that full_rank mode creates J parameter."""
+        N, R, d_in = 100, 2, 4
+        cfg = RNNConfig(N=N, R=R, d_in=d_in)
+        key = jax.random.PRNGKey(42)
+
+        model, params = create_rnn_and_params(cfg, key, training_mode="full_rank")
+
+        assert model.training_mode == "full_rank"
+        assert params.J is not None
+        assert params.J.shape == (N, N)
+        # C, M, N_lr should still exist
+        assert params.C.shape == (N, N)
+        assert params.M.shape == (N, R)
+        assert params.N_lr.shape == (N, R)
+
+    def test_low_rank_init_no_j(self):
+        """Test that low_rank mode has J=None."""
+        N = 100
+        cfg = RNNConfig(N=N)
+        key = jax.random.PRNGKey(42)
+
+        model, params = create_rnn_and_params(cfg, key, training_mode="low_rank")
+
+        assert model.training_mode == "low_rank"
+        assert params.J is None
+
+    def test_full_rank_param_count(self):
+        """Test trainable parameter count in full_rank mode."""
+        N, R, d_in = 100, 2, 4
+        cfg = RNNConfig(N=N, R=R, d_in=d_in)
+        key = jax.random.PRNGKey(42)
+
+        model, params = create_rnn_and_params(cfg, key, training_mode="full_rank")
+
+        n_trainable = count_parameters(params, trainable_only=True, training_mode="full_rank")
+
+        # Expected: J(N*N) + B(N*d_in) + w(N) + b(1)
+        expected = N * N + N * d_in + N + 1
+        assert n_trainable == expected
+
+    def test_compute_J_full_rank(self):
+        """Test that compute_J returns J directly in full_rank mode."""
+        N, R = 50, 2
+        g = 0.8
+        cfg = RNNConfig(N=N, R=R, g=g)
+        key = jax.random.PRNGKey(42)
+
+        model, params = create_rnn_and_params(cfg, key, training_mode="full_rank")
+
+        J_computed = LowRankRNN.compute_J(params, g, N, training_mode="full_rank")
+
+        # Should return params.J directly
+        assert jnp.allclose(J_computed, params.J)
+
+    def test_compute_J_low_rank(self):
+        """Test that compute_J computes g*C + (1/N)*M@N^T in low_rank mode."""
+        N, R = 50, 2
+        g = 0.8
+        cfg = RNNConfig(N=N, R=R, g=g)
+        key = jax.random.PRNGKey(42)
+
+        model, params = create_rnn_and_params(cfg, key, training_mode="low_rank")
+
+        J_computed = LowRankRNN.compute_J(params, g, N, training_mode="low_rank")
+
+        # Should compute g*C + (1/N)*M@N^T
+        expected = g * params.C + (1.0 / N) * params.M @ params.N_lr.T
+        assert jnp.allclose(J_computed, expected)
+
+    def test_simulate_trial_fast_full_rank(self):
+        """Test fast simulation in full_rank mode."""
+        N = 50
+        T_steps = 100
+        cfg = RNNConfig(N=N)
+        key = jax.random.PRNGKey(42)
+
+        model, params = create_rnn_and_params(cfg, key, training_mode="full_rank")
+
+        u_seq = jnp.zeros((T_steps, 4))
+        dt = 0.1
+
+        xs, ys = model.simulate_trial_fast(params, u_seq, dt)
+
+        assert xs.shape == (T_steps, N)
+        assert ys.shape == (T_steps,)
+        assert not jnp.any(jnp.isnan(xs))
+        assert not jnp.any(jnp.isnan(ys))
+
+    def test_gradients_full_rank(self):
+        """Test that gradients can be computed for J in full_rank mode."""
+        N = 30
+        T_steps = 50
+        cfg = RNNConfig(N=N)
+        key = jax.random.PRNGKey(42)
+
+        model, params = create_rnn_and_params(cfg, key, training_mode="full_rank")
+
+        u_seq = jnp.zeros((T_steps, 4))
+        dt = 0.1
+
+        def loss_fn(trainable):
+            test_params = RNNParams(
+                C=params.C,
+                M=params.M,
+                N_lr=params.N_lr,
+                B=params.B,
+                w=params.w,
+                b=params.b,
+                J=trainable['J'],
+            )
+            _, ys = model.simulate_trial_fast(test_params, u_seq, dt)
+            return jnp.mean(ys ** 2)
+
+        trainable = {'J': params.J}
+        loss, grads = jax.value_and_grad(loss_fn)(trainable)
+
+        assert not jnp.isnan(loss)
+        assert 'J' in grads
+        assert grads['J'].shape == params.J.shape
+        assert not jnp.any(jnp.isnan(grads['J']))
+
+    def test_j_init_scaling(self):
+        """Test that J is initialized with correct scaling."""
+        N = 1000
+        g = 0.8
+        cfg = RNNConfig(N=N, g=g, J_init_std=1.0)
+        key = jax.random.PRNGKey(42)
+
+        model, params = create_rnn_and_params(cfg, key, training_mode="full_rank")
+
+        # Variance should be approximately g^2 / N
+        variance = jnp.var(params.J)
+        expected_variance = (g ** 2) / N
+        assert jnp.abs(variance - expected_variance) < 0.1 * expected_variance
