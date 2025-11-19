@@ -66,6 +66,12 @@ class TestTrainingConfig:
         assert cfg.train_N is True
         assert cfg.train_B is True
         assert cfg.train_w is True
+        assert cfg.training_mode == "low_rank"
+
+    def test_full_rank_mode(self):
+        """Test setting full_rank training mode."""
+        cfg = TrainingConfig(training_mode="full_rank")
+        assert cfg.training_mode == "full_rank"
 
 
 class TestTaskConfig:
