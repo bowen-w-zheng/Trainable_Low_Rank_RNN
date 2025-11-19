@@ -194,7 +194,7 @@ def make_eval_step(model, dataset, rnn_cfg, task_cfg):
 
 
 def make_trial_output_fn(model, dataset, task_cfg):
-    """Create function to get full trial outputs for plotting."""
+    """Create function to get full trial outputs and hidden states for plotting."""
     dt = dataset.dt
     label_type = task_cfg.label_type
 
@@ -208,25 +208,26 @@ def make_trial_output_fn(model, dataset, task_cfg):
             b=trainable_params.get('b', fixed_params.get('b', jnp.zeros(()))),
             J=trainable_params.get('J', fixed_params.get('J', None)),
         )
-        _, ys = model.simulate_trial_fast(params, u_seq, dt)
+        xs, ys = model.simulate_trial_fast(params, u_seq, dt)
 
         if label_type == "pm1":
-            return jnp.tanh(ys)
+            return xs, jnp.tanh(ys)
         else:
-            return jax.nn.sigmoid(ys)
+            return xs, jax.nn.sigmoid(ys)
 
     return jax.jit(get_trial_outputs)
 
 
 def plot_network_performance(
     model, trainable_params, fixed_params, dataset, task_cfg, epoch,
-    output_dir, key, n_trials=5
+    output_dir, key, n_trials=5, n_neurons=10
 ):
     """
     Plot network performance on sample trials.
 
     Shows network output vs ground truth target for n_trials.
     If test_contexts is defined, shows trials from both train and test contexts.
+    Also shows sampled neuron activities.
     """
     get_trial_outputs = make_trial_output_fn(model, dataset, task_cfg)
 
@@ -239,7 +240,9 @@ def plot_network_performance(
         n_train_trials = n_trials
         n_test_trials = 0
 
-    keys = jax.random.split(key, n_trials)
+    keys = jax.random.split(key, n_trials + 1)
+    neuron_key = keys[0]
+    trial_keys = keys[1:]
 
     fig, axes = plt.subplots(n_trials, 3, figsize=(15, 3 * n_trials))
     if n_trials == 1:
@@ -248,24 +251,30 @@ def plot_network_performance(
     for i in range(n_trials):
         # Sample from train or test contexts
         if i < n_train_trials:
-            trial = dataset.sample_trial(keys[i], use_test_contexts=False)
+            trial = dataset.sample_trial(trial_keys[i], use_test_contexts=False)
             context_type = "TRAIN"
         else:
-            trial = dataset.sample_trial(keys[i], use_test_contexts=True)
+            trial = dataset.sample_trial(trial_keys[i], use_test_contexts=True)
             context_type = "HELD-OUT"
 
-        # Get network output
-        y_pred = get_trial_outputs(trainable_params, fixed_params, trial['u_seq'])
+        # Get network output and hidden states
+        xs, y_pred = get_trial_outputs(trainable_params, fixed_params, trial['u_seq'])
 
         # Convert to numpy
         times = np.array(trial['times'])
         u_seq = np.array(trial['u_seq'])
         y_time = np.array(trial['y_time'])
         y_pred_np = np.array(y_pred)
+        xs_np = np.array(xs)  # (n_steps, N)
         context = float(trial['context'])
         label = float(trial['label'])
         a1 = float(trial['a1'])
         a2 = float(trial['a2'])
+
+        # Sample neurons to plot (same for all trials)
+        N = xs_np.shape[1]
+        neuron_indices = jax.random.choice(neuron_key, N, shape=(min(n_neurons, N),), replace=False)
+        neuron_indices = np.array(neuron_indices)
 
         # Plot 1: Inputs
         ax1 = axes[i, 0]
@@ -283,17 +292,25 @@ def plot_network_performance(
         ax1.legend(loc='upper right', fontsize=8)
         ax1.grid(True, alpha=0.3)
 
-        # Plot 2: Network output vs target
+        # Plot 2: Network output vs target with neuron activities
         ax2 = axes[i, 1]
-        ax2.plot(times, y_time, 'k-', label='Target', linewidth=2)
-        ax2.plot(times, y_pred_np, 'b-', label='Network', linewidth=1.5, alpha=0.8)
+
+        # Plot sampled neuron activities (tanh of hidden states)
+        neuron_activities = np.tanh(xs_np[:, neuron_indices])
+        for j in range(len(neuron_indices)):
+            ax2.plot(times, neuron_activities[:, j], '-', alpha=0.4, linewidth=0.8)
+
+        # Plot target and readout with thicker lines
+        ax2.plot(times, y_time, 'k-', label='Target', linewidth=3)
+        ax2.plot(times, y_pred_np, 'b-', label='Readout', linewidth=2.5)
         ax2.axvline(task_cfg.t_response_on, color='gray', linestyle='--', alpha=0.5)
         ax2.axvline(task_cfg.t_response_off, color='gray', linestyle='--', alpha=0.5)
         ax2.axvspan(task_cfg.t_response_on, task_cfg.t_response_off, alpha=0.1, color='green')
-        ax2.set_ylabel('Output')
-        ax2.set_ylim(-0.1, 1.1)
+        ax2.set_ylabel('Activity')
+        ax2.set_ylim(-1.1, 1.1)
         ax2.legend(loc='upper right', fontsize=8)
         ax2.grid(True, alpha=0.3)
+        ax2.set_title(f'{n_neurons} neurons + readout')
 
         # Compute prediction
         resp_start, resp_end = dataset.get_avg_window_indices()
@@ -304,8 +321,8 @@ def plot_network_performance(
         # Plot 3: Response window detail
         ax3 = axes[i, 2]
         resp_times = times[resp_start:resp_end]
-        ax3.plot(resp_times, y_time[resp_start:resp_end], 'k-', label='Target', linewidth=2)
-        ax3.plot(resp_times, y_pred_np[resp_start:resp_end], 'b-', label='Network', linewidth=1.5)
+        ax3.plot(resp_times, y_time[resp_start:resp_end], 'k-', label='Target', linewidth=3)
+        ax3.plot(resp_times, y_pred_np[resp_start:resp_end], 'b-', label='Readout', linewidth=2.5)
         ax3.axhline(0.5, color='gray', linestyle='--', alpha=0.5)
         ax3.set_ylabel('Output')
         ax3.set_xlabel('Time (s)')
