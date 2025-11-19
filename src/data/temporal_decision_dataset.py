@@ -602,18 +602,22 @@ if __name__ == "__main__":
     print()
 
     # Plot single trial
+    import os
+    figs_dir = "figs/temporal_decision"
+    os.makedirs(figs_dir, exist_ok=True)
+
     key, subkey = jax.random.split(key)
     trial = dataset.sample_trial(subkey)
-    fig1 = plot_single_trial(trial, task_cfg, save_path="single_trial_example.png")
-    print("Saved single trial plot to: single_trial_example.png")
+    fig1 = plot_single_trial(trial, task_cfg, save_path=f"{figs_dir}/single_trial_example.png")
+    print(f"Saved single trial plot to: {figs_dir}/single_trial_example.png")
 
     # Plot interpolation comparison
     key, subkey = jax.random.split(key)
     fig2 = plot_interpolation_comparison(
         dataset, subkey,
         a1=0.5, a2=-0.3,
-        save_path="interpolation_comparison.png"
+        save_path=f"{figs_dir}/interpolation_comparison.png"
     )
-    print("Saved interpolation comparison to: interpolation_comparison.png")
+    print(f"Saved interpolation comparison to: {figs_dir}/interpolation_comparison.png")
 
     plt.show()

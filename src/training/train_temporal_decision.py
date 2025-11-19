@@ -10,6 +10,9 @@ from typing import Dict, Tuple
 import jax
 import jax.numpy as jnp
 import optax
+import yaml
+import matplotlib.pyplot as plt
+import numpy as np
 
 from src.config import RNNConfig, IntegratorConfig, TrainingConfig
 from src.models.lowrank_rnn import LowRankRNN, RNNParams, create_rnn_and_params, count_parameters
@@ -22,13 +25,27 @@ from src.data.temporal_decision_dataset import (
 )
 
 
+def load_config(config_path: str):
+    """Load configuration from YAML file."""
+    with open(config_path, 'r') as f:
+        data = yaml.safe_load(f)
+
+    rnn_cfg = RNNConfig(**data.get('rnn', {}))
+    training_cfg = TrainingConfig(**data.get('training', {}))
+
+    # Load task config
+    task_data = data.get('task', {})
+    task_cfg = TemporalDecisionTaskConfig(**task_data)
+
+    return rnn_cfg, task_cfg, training_cfg, data.get('name', 'temporal_decision')
+
+
 def create_optimizer(training_cfg: TrainingConfig, n_iterations: int) -> optax.GradientTransformation:
     """Create optimizer with learning rate schedule."""
-    # Cosine decay schedule
     schedule = optax.cosine_decay_schedule(
         init_value=training_cfg.learning_rate,
         decay_steps=n_iterations,
-        alpha=0.01  # Final LR = 1% of initial
+        alpha=0.01
     )
 
     if training_cfg.optimizer == "adam":
@@ -38,7 +55,6 @@ def create_optimizer(training_cfg: TrainingConfig, n_iterations: int) -> optax.G
     else:
         raise ValueError(f"Unknown optimizer: {training_cfg.optimizer}")
 
-    # Add gradient clipping
     if training_cfg.grad_clip > 0:
         opt = optax.chain(
             optax.clip_by_global_norm(training_cfg.grad_clip),
@@ -49,22 +65,15 @@ def create_optimizer(training_cfg: TrainingConfig, n_iterations: int) -> optax.G
 
 
 def make_train_step(model, dataset, rnn_cfg, task_cfg, training_cfg, n_iterations: int):
-    """
-    Create the training step function.
-
-    Returns a JIT-compiled function that performs one optimization step.
-    """
+    """Create the training step function."""
     resp_start, resp_end = dataset.get_avg_window_indices()
     dt = dataset.dt
     loss_type = task_cfg.loss_type
     label_type = task_cfg.label_type
 
-    # Create optimizer with schedule
     optimizer = create_optimizer(training_cfg, n_iterations)
 
     def loss_fn(trainable_params, fixed_params, batch):
-        """Compute loss for a batch."""
-        # Reconstruct full params
         params = RNNParams(
             C=fixed_params['C'],
             M=trainable_params.get('M', fixed_params.get('M', None)),
@@ -77,22 +86,17 @@ def make_train_step(model, dataset, rnn_cfg, task_cfg, training_cfg, n_iteration
 
         def single_trial(u_seq, label):
             _, ys = model.simulate_trial_fast(params, u_seq, dt)
-            # Average output in response window
             y_hat = jnp.mean(ys[resp_start:resp_end])
 
-            # Compute loss based on type
             if loss_type == "bce":
-                # Binary cross-entropy
                 prob = jax.nn.sigmoid(y_hat)
                 loss = -label * jnp.log(prob + 1e-7) - (1 - label) * jnp.log(1 - prob + 1e-7)
-            else:  # mse
+            else:
                 if label_type == "pm1":
-                    target = label
                     pred = jnp.tanh(y_hat)
                 else:
-                    target = label
                     pred = jax.nn.sigmoid(y_hat)
-                loss = (pred - target) ** 2
+                loss = (pred - label) ** 2
 
             return y_hat, loss
 
@@ -102,16 +106,13 @@ def make_train_step(model, dataset, rnn_cfg, task_cfg, training_cfg, n_iteration
         return loss, y_hats
 
     def train_step(trainable_params, fixed_params, opt_state, batch):
-        """Single training step."""
         (loss, y_hats), grads = jax.value_and_grad(loss_fn, has_aux=True)(
             trainable_params, fixed_params, batch
         )
 
-        # Compute updates
         updates, opt_state = optimizer.update(grads, opt_state, trainable_params)
         trainable_params = optax.apply_updates(trainable_params, updates)
 
-        # Compute accuracy
         if label_type == "pm1":
             preds = jnp.sign(y_hats)
             acc = jnp.mean(preds == batch['labels'])
@@ -119,12 +120,7 @@ def make_train_step(model, dataset, rnn_cfg, task_cfg, training_cfg, n_iteration
             preds = (jax.nn.sigmoid(y_hats) > 0.5).astype(jnp.float32)
             acc = jnp.mean(preds == batch['labels'])
 
-        metrics = {
-            'loss': loss,
-            'accuracy': acc,
-        }
-
-        return trainable_params, opt_state, metrics
+        return trainable_params, opt_state, {'loss': loss, 'accuracy': acc}
 
     return jax.jit(train_step), optimizer
 
@@ -137,7 +133,6 @@ def make_eval_step(model, dataset, rnn_cfg, task_cfg):
     label_type = task_cfg.label_type
 
     def eval_step(trainable_params, fixed_params, batch):
-        """Evaluate on a batch."""
         params = RNNParams(
             C=fixed_params['C'],
             M=trainable_params.get('M', fixed_params.get('M', None)),
@@ -152,25 +147,21 @@ def make_eval_step(model, dataset, rnn_cfg, task_cfg):
             _, ys = model.simulate_trial_fast(params, u_seq, dt)
             y_hat = jnp.mean(ys[resp_start:resp_end])
 
-            # Compute loss
             if loss_type == "bce":
                 prob = jax.nn.sigmoid(y_hat)
                 loss = -label * jnp.log(prob + 1e-7) - (1 - label) * jnp.log(1 - prob + 1e-7)
             else:
                 if label_type == "pm1":
-                    target = label
                     pred = jnp.tanh(y_hat)
                 else:
-                    target = label
                     pred = jax.nn.sigmoid(y_hat)
-                loss = (pred - target) ** 2
+                loss = (pred - label) ** 2
 
             return y_hat, loss
 
         y_hats, losses = jax.vmap(single_trial)(batch['u_seq'], batch['labels'], batch['contexts'])
         loss = jnp.mean(losses)
 
-        # Compute accuracy
         if label_type == "pm1":
             preds = jnp.sign(y_hats)
             acc = jnp.mean(preds == batch['labels'])
@@ -178,7 +169,6 @@ def make_eval_step(model, dataset, rnn_cfg, task_cfg):
             preds = (jax.nn.sigmoid(y_hats) > 0.5).astype(jnp.float32)
             acc = jnp.mean(preds == batch['labels'])
 
-        # Context-specific accuracy (low c vs high c)
         low_c_mask = batch['contexts'] < 0.5
         high_c_mask = batch['contexts'] >= 0.5
 
@@ -203,24 +193,133 @@ def make_eval_step(model, dataset, rnn_cfg, task_cfg):
     return jax.jit(eval_step)
 
 
+def make_trial_output_fn(model, dataset, task_cfg):
+    """Create function to get full trial outputs for plotting."""
+    dt = dataset.dt
+    label_type = task_cfg.label_type
+
+    def get_trial_outputs(trainable_params, fixed_params, u_seq):
+        params = RNNParams(
+            C=fixed_params['C'],
+            M=trainable_params.get('M', fixed_params.get('M', None)),
+            N_lr=trainable_params.get('N_lr', fixed_params.get('N_lr', None)),
+            B=trainable_params.get('B', fixed_params.get('B', None)),
+            w=trainable_params.get('w', fixed_params.get('w', None)),
+            b=trainable_params.get('b', fixed_params.get('b', jnp.zeros(()))),
+            J=trainable_params.get('J', fixed_params.get('J', None)),
+        )
+        _, ys = model.simulate_trial_fast(params, u_seq, dt)
+
+        if label_type == "pm1":
+            return jnp.tanh(ys)
+        else:
+            return jax.nn.sigmoid(ys)
+
+    return jax.jit(get_trial_outputs)
+
+
+def plot_network_performance(
+    model, trainable_params, fixed_params, dataset, task_cfg, epoch,
+    output_dir, key, n_trials=5
+):
+    """
+    Plot network performance on sample trials.
+
+    Shows network output vs ground truth target for n_trials.
+    """
+    get_trial_outputs = make_trial_output_fn(model, dataset, task_cfg)
+
+    # Sample trials
+    keys = jax.random.split(key, n_trials)
+
+    fig, axes = plt.subplots(n_trials, 3, figsize=(15, 3 * n_trials))
+    if n_trials == 1:
+        axes = axes.reshape(1, -1)
+
+    for i in range(n_trials):
+        trial = dataset.sample_trial(keys[i])
+
+        # Get network output
+        y_pred = get_trial_outputs(trainable_params, fixed_params, trial['u_seq'])
+
+        # Convert to numpy
+        times = np.array(trial['times'])
+        u_seq = np.array(trial['u_seq'])
+        y_time = np.array(trial['y_time'])
+        y_pred_np = np.array(y_pred)
+        context = float(trial['context'])
+        label = float(trial['label'])
+        a1 = float(trial['a1'])
+        a2 = float(trial['a2'])
+
+        # Plot 1: Inputs
+        ax1 = axes[i, 0]
+        ax1.plot(times, u_seq[:, 0], 'b-', label='u1', linewidth=1.5)
+        ax1.plot(times, u_seq[:, 1], 'r-', label='u2', linewidth=1.5)
+        ax1.axvline(task_cfg.t_stim_on, color='gray', linestyle='--', alpha=0.5)
+        ax1.axvline(task_cfg.t_stim_off, color='gray', linestyle='--', alpha=0.5)
+        ax1.set_ylabel('Input')
+        ax1.set_title(f'Trial {i+1}: c={context:.2f}, a1={a1:.2f}, a2={a2:.2f}')
+        ax1.legend(loc='upper right', fontsize=8)
+        ax1.grid(True, alpha=0.3)
+
+        # Plot 2: Network output vs target
+        ax2 = axes[i, 1]
+        ax2.plot(times, y_time, 'k-', label='Target', linewidth=2)
+        ax2.plot(times, y_pred_np, 'b-', label='Network', linewidth=1.5, alpha=0.8)
+        ax2.axvline(task_cfg.t_response_on, color='gray', linestyle='--', alpha=0.5)
+        ax2.axvline(task_cfg.t_response_off, color='gray', linestyle='--', alpha=0.5)
+        ax2.axvspan(task_cfg.t_response_on, task_cfg.t_response_off, alpha=0.1, color='green')
+        ax2.set_ylabel('Output')
+        ax2.set_ylim(-0.1, 1.1)
+        ax2.legend(loc='upper right', fontsize=8)
+        ax2.grid(True, alpha=0.3)
+
+        # Compute prediction
+        resp_start, resp_end = dataset.get_avg_window_indices()
+        pred_val = float(np.mean(y_pred_np[resp_start:resp_end]))
+        pred_label = 1 if pred_val > 0.5 else 0
+        correct = "✓" if pred_label == label else "✗"
+
+        # Plot 3: Response window detail
+        ax3 = axes[i, 2]
+        resp_times = times[resp_start:resp_end]
+        ax3.plot(resp_times, y_time[resp_start:resp_end], 'k-', label='Target', linewidth=2)
+        ax3.plot(resp_times, y_pred_np[resp_start:resp_end], 'b-', label='Network', linewidth=1.5)
+        ax3.axhline(0.5, color='gray', linestyle='--', alpha=0.5)
+        ax3.set_ylabel('Output')
+        ax3.set_xlabel('Time (s)')
+        ax3.set_ylim(-0.1, 1.1)
+
+        decision = "Go" if label > 0.5 else "No-Go"
+        ax3.set_title(f'{decision} | pred={pred_val:.2f} {correct}')
+        ax3.legend(loc='upper right', fontsize=8)
+        ax3.grid(True, alpha=0.3)
+
+    fig.suptitle(f'Network Performance - Epoch {epoch}', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+
+    # Save plot
+    plot_path = os.path.join(output_dir, f'performance_epoch_{epoch:03d}.png')
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+    return plot_path
+
+
 def train(
     rnn_cfg: RNNConfig,
     task_cfg: TemporalDecisionTaskConfig,
     training_cfg: TrainingConfig,
+    output_dir: str,
     verbose: bool = True
 ):
-    """
-    Main training function with epoch-based training.
+    """Main training function with epoch-based training."""
+    # Create output directories
+    os.makedirs(output_dir, exist_ok=True)
+    figs_dir = os.path.join(output_dir, 'figs')
+    os.makedirs(figs_dir, exist_ok=True)
 
-    Args:
-        rnn_cfg: RNN configuration
-        task_cfg: Task configuration
-        training_cfg: Training configuration
-        verbose: Whether to print progress
-
-    Returns:
-        Trained parameters and training logs
-    """
     # Set random seed
     key = jax.random.PRNGKey(training_cfg.seed)
 
@@ -245,7 +344,7 @@ def train(
         print(f"  Stimulus window: [{task_cfg.t_stim_on}, {task_cfg.t_stim_off}]s")
         print(f"  Response window: [{task_cfg.t_response_on}, {task_cfg.t_response_off}]s")
 
-    # Split params into trainable and fixed
+    # Split params
     trainable_params = {}
     fixed_params = {'C': params.C}
 
@@ -277,21 +376,21 @@ def train(
         fixed_params['w'] = params.w
         fixed_params['b'] = params.b
 
-    # Compute iterations per epoch and total iterations
+    # Compute iterations
     iters_per_epoch = training_cfg.n_train_trials // training_cfg.batch_size
     n_epochs = training_cfg.n_epochs
     n_iterations = n_epochs * iters_per_epoch
 
-    # Create training and evaluation functions
+    # Create functions
     train_step, optimizer = make_train_step(
         model, dataset, rnn_cfg, task_cfg, training_cfg, n_iterations
     )
     eval_step = make_eval_step(model, dataset, rnn_cfg, task_cfg)
 
-    # Initialize optimizer state
+    # Initialize optimizer
     opt_state = optimizer.init(trainable_params)
 
-    # Training logs
+    # Logs
     logs = {
         'train_loss': [],
         'train_accuracy': [],
@@ -306,22 +405,18 @@ def train(
         print(f"\nStarting training for {n_epochs} epochs")
         print(f"  {iters_per_epoch} iterations per epoch ({training_cfg.n_train_trials} trials)")
         print(f"  batch_size={training_cfg.batch_size}, lr={training_cfg.learning_rate}")
-        print(f"  Using cosine LR schedule: {training_cfg.learning_rate} -> {training_cfg.learning_rate * 0.01}")
+        print(f"  Plots every 10 epochs saved to: {figs_dir}")
         print()
 
-    # Training loop - epoch based
+    # Training loop
     for epoch in range(n_epochs):
-        # Track epoch metrics
         epoch_loss = 0.0
         epoch_acc = 0.0
 
-        # Iterate over all training data
         for _ in range(iters_per_epoch):
-            # Sample batch
             key, batch_key = jax.random.split(key)
             batch = dataset.sample_batch(batch_key, training_cfg.batch_size)
 
-            # Training step
             trainable_params, opt_state, metrics = train_step(
                 trainable_params, fixed_params, opt_state, batch
             )
@@ -329,7 +424,6 @@ def train(
             epoch_loss += float(metrics['loss'])
             epoch_acc += float(metrics['accuracy'])
 
-        # Compute epoch averages
         avg_loss = epoch_loss / iters_per_epoch
         avg_acc = epoch_acc / iters_per_epoch
 
@@ -337,7 +431,7 @@ def train(
         logs['train_accuracy'].append(avg_acc)
         logs['epoch'].append(epoch + 1)
 
-        # Evaluation at end of epoch
+        # Evaluation
         key, eval_key = jax.random.split(key)
         val_batch = dataset.sample_batch(eval_key, training_cfg.n_val_trials)
         val_metrics = eval_step(trainable_params, fixed_params, val_batch)
@@ -353,7 +447,17 @@ def train(
                   f"val_loss={val_metrics['loss']:.4f}, val_acc={val_metrics['accuracy']:.1%} "
                   f"(c<0.5: {val_metrics['low_c_accuracy']:.1%}, c>=0.5: {val_metrics['high_c_accuracy']:.1%})")
 
-    # Reconstruct final params
+        # Plot every 10 epochs
+        if (epoch + 1) % 10 == 0 or epoch == 0:
+            key, plot_key = jax.random.split(key)
+            plot_path = plot_network_performance(
+                model, trainable_params, fixed_params, dataset, task_cfg,
+                epoch + 1, figs_dir, plot_key, n_trials=5
+            )
+            if verbose:
+                print(f"  -> Saved performance plot: {plot_path}")
+
+    # Final params
     final_params = RNNParams(
         C=fixed_params['C'],
         M=trainable_params.get('M', fixed_params.get('M')),
@@ -369,9 +473,6 @@ def train(
 
 def save_results(params: RNNParams, logs: dict, output_dir: str):
     """Save training results."""
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Save parameters
     params_dict = {
         'C': params.C.tolist(),
         'M': params.M.tolist(),
@@ -386,99 +487,98 @@ def save_results(params: RNNParams, logs: dict, output_dir: str):
     with open(os.path.join(output_dir, 'params.pkl'), 'wb') as f:
         pickle.dump(params_dict, f)
 
-    # Save logs
     with open(os.path.join(output_dir, 'logs.json'), 'w') as f:
         json.dump(logs, f, indent=2)
+
+
+def plot_training_curves(logs: dict, output_dir: str):
+    """Plot training curves."""
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+    epochs = logs['epoch']
+
+    # Loss
+    axes[0].plot(epochs, logs['train_loss'], 'b-', label='Train')
+    axes[0].plot(epochs, logs['val_loss'], 'r-', label='Val')
+    axes[0].set_xlabel('Epoch')
+    axes[0].set_ylabel('Loss')
+    axes[0].set_title('Loss')
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+
+    # Accuracy
+    axes[1].plot(epochs, logs['train_accuracy'], 'b-', label='Train')
+    axes[1].plot(epochs, logs['val_accuracy'], 'r-', label='Val')
+    axes[1].plot(epochs, logs['val_low_c_accuracy'], 'g--', label='Val (c<0.5)', alpha=0.7)
+    axes[1].plot(epochs, logs['val_high_c_accuracy'], 'm--', label='Val (c>=0.5)', alpha=0.7)
+    axes[1].set_xlabel('Epoch')
+    axes[1].set_ylabel('Accuracy')
+    axes[1].set_title('Accuracy')
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
+    axes[1].set_ylim(0, 1.05)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'training_curves.png'), dpi=150, bbox_inches='tight')
+    plt.close(fig)
 
 
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(description='Train low-rank RNN on temporal decision task')
+    parser.add_argument('--config', type=str, default='configs/temporal_decision_default.yaml',
+                        help='Path to config file')
     parser.add_argument('--output', type=str, default='results',
                         help='Output directory')
     parser.add_argument('--quiet', action='store_true',
                         help='Suppress output')
-
-    # Model parameters
-    parser.add_argument('--N', type=int, default=100, help='Number of recurrent units')
-    parser.add_argument('--R', type=int, default=2, help='Rank of low-rank connectivity')
-    parser.add_argument('--g', type=float, default=0.8, help='Gain for random bulk')
-    parser.add_argument('--tau', type=float, default=0.1, help='Time constant')
-
-    # Training parameters
-    parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
-    parser.add_argument('--batch-size', type=int, default=64, help='Batch size')
-    parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
-    parser.add_argument('--n-train', type=int, default=10000, help='Training trials per epoch')
-    parser.add_argument('--n-val', type=int, default=1000, help='Validation trials')
-    parser.add_argument('--seed', type=int, default=42, help='Random seed')
-
     args = parser.parse_args()
 
-    # Create configurations
-    rnn_cfg = RNNConfig(
-        N=args.N,
-        R=args.R,
-        g=args.g,
-        tau=args.tau,
-        d_in=3,  # u1, u2, c
-    )
+    # Load config
+    if os.path.exists(args.config):
+        rnn_cfg, task_cfg, training_cfg, name = load_config(args.config)
+        if not args.quiet:
+            print(f"Loaded config from: {args.config}")
+    else:
+        print(f"Config not found: {args.config}, using defaults")
+        rnn_cfg = RNNConfig(N=100, R=2, g=0.8, tau=0.1, d_in=3)
+        task_cfg = TemporalDecisionTaskConfig()
+        training_cfg = TrainingConfig(n_epochs=50, batch_size=64, n_train_trials=10000, n_val_trials=1000)
+        name = "temporal_decision"
 
-    task_cfg = TemporalDecisionTaskConfig(
-        dt=0.01,
-        T_trial=1.0,
-        t_stim_on=0.2,
-        t_stim_off=0.7,
-        t_response_on=0.8,
-        t_response_off=1.0,
-        mu1=0.0,
-        sigma1=1.0,
-        mu2=0.0,
-        sigma2=1.0,
-        theta=0.0,
-        label_type="binary",
-        loss_type="bce"
-    )
-
-    training_cfg = TrainingConfig(
-        batch_size=args.batch_size,
-        n_epochs=args.epochs,
-        learning_rate=args.lr,
-        n_train_trials=args.n_train,
-        n_val_trials=args.n_val,
-        seed=args.seed,
-        optimizer="adam",
-        grad_clip=1.0,
-        training_mode="low_rank",
-        train_M=True,
-        train_N=True,
-        train_B=True,
-        train_w=True,
-    )
+    # Create output directory
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_dir = os.path.join(args.output, f'{name}_{timestamp}')
 
     # Train
-    params, logs, model, dataset = train(rnn_cfg, task_cfg, training_cfg, verbose=not args.quiet)
+    params, logs, model, dataset = train(
+        rnn_cfg, task_cfg, training_cfg, output_dir, verbose=not args.quiet
+    )
 
     # Save results
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_dir = os.path.join(args.output, f'temporal_decision_{timestamp}')
     save_results(params, logs, output_dir)
+
+    # Plot training curves
+    plot_training_curves(logs, output_dir)
+
+    # Generate example plots
+    key = jax.random.PRNGKey(0)
+    figs_dir = os.path.join(output_dir, 'figs')
+
+    trial = dataset.sample_trial(key)
+    plot_single_trial(trial, task_cfg, save_path=os.path.join(figs_dir, 'example_trial.png'))
+
+    key, subkey = jax.random.split(key)
+    plot_interpolation_comparison(
+        dataset, subkey, a1=0.8, a2=-0.5,
+        save_path=os.path.join(figs_dir, 'interpolation_comparison.png')
+    )
 
     if not args.quiet:
         print(f"\nResults saved to {output_dir}")
         print(f"Final validation accuracy: {logs['val_accuracy'][-1]:.1%}")
-
-        # Generate example plots
-        key = jax.random.PRNGKey(0)
-        trial = dataset.sample_trial(key)
-        plot_single_trial(trial, task_cfg, save_path=os.path.join(output_dir, 'example_trial.png'))
-
-        key, subkey = jax.random.split(key)
-        plot_interpolation_comparison(
-            dataset, subkey, a1=0.8, a2=-0.5,
-            save_path=os.path.join(output_dir, 'interpolation_comparison.png')
-        )
-        print(f"Example plots saved to {output_dir}")
+        print(f"Training curves: {output_dir}/training_curves.png")
+        print(f"Performance plots: {output_dir}/figs/")
 
 
 if __name__ == '__main__':
