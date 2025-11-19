@@ -23,14 +23,14 @@ class TemporalDecisionTaskConfig:
     t_response_on: float = 0.8  # Response window start (seconds)
     t_response_off: float = 1.0  # Response window end (seconds)
 
-    # Stimulus distribution parameters
-    mu1: float = 0.0  # Mean of stimulus 1
-    sigma1: float = 1.0  # Std of stimulus 1
-    mu2: float = 0.0  # Mean of stimulus 2
-    sigma2: float = 1.0  # Std of stimulus 2
+    # Stimulus distribution parameters (legacy, not used - stimuli sampled uniformly from [-1, 1])
+    mu1: float = 0.0  # Legacy: Mean of stimulus 1
+    sigma1: float = 1.0  # Legacy: Std of stimulus 1
+    mu2: float = 0.0  # Legacy: Mean of stimulus 2
+    sigma2: float = 1.0  # Legacy: Std of stimulus 2
 
-    # Input noise
-    input_noise_std: float = 0.0  # Temporal noise on input signals
+    # Input noise (temporal Gaussian noise added on top of uniform stimulus)
+    input_noise_std: float = 0.0  # Temporal noise on input signals (Gaussian)
 
     # Decision threshold
     theta: float = 0.0  # Threshold for Go/No-Go
@@ -137,9 +137,9 @@ class TemporalDecisionDataset:
             # Sample uniformly from [0, 1]
             context = jax.random.uniform(keys[0], ())
 
-        # Sample stimulus amplitudes
-        a1 = jax.random.normal(keys[1], ()) * self.task_cfg.sigma1 + self.task_cfg.mu1
-        a2 = jax.random.normal(keys[2], ()) * self.task_cfg.sigma2 + self.task_cfg.mu2
+        # Sample stimulus amplitudes uniformly from [-1, 1]
+        a1 = jax.random.uniform(keys[1], (), minval=-1.0, maxval=1.0)
+        a2 = jax.random.uniform(keys[2], (), minval=-1.0, maxval=1.0)
 
         # Build input sequence (with noise)
         u_seq = self._build_input_sequence(a1, a2, context, keys[3])
@@ -196,11 +196,11 @@ class TemporalDecisionDataset:
         """
         keys = jax.random.split(key, 3)
 
-        # Use provided amplitudes or sample
+        # Use provided amplitudes or sample uniformly from [-1, 1]
         if a1 is None:
-            a1 = jax.random.normal(keys[0], ()) * self.task_cfg.sigma1 + self.task_cfg.mu1
+            a1 = jax.random.uniform(keys[0], (), minval=-1.0, maxval=1.0)
         if a2 is None:
-            a2 = jax.random.normal(keys[1], ()) * self.task_cfg.sigma2 + self.task_cfg.mu2
+            a2 = jax.random.uniform(keys[1], (), minval=-1.0, maxval=1.0)
 
         # Build input sequence (with noise)
         u_seq = self._build_input_sequence(a1, a2, context, keys[2])
