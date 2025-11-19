@@ -1,4 +1,4 @@
-"""Training script for the temporal decision task (Interpolating Go-No-Go)."""
+"""Training script for the temporal decision task (Evidence Integration Regression)."""
 
 import argparse
 import json
@@ -84,23 +84,16 @@ def make_train_step(model, dataset, rnn_cfg, task_cfg, training_cfg, n_iteration
             J=trainable_params.get('J', fixed_params.get('J', None)),
         )
 
-        def single_trial(u_seq, label):
+        def single_trial(u_seq, target):
             _, ys = model.simulate_trial_fast(params, u_seq, dt)
             y_hat = jnp.mean(ys[resp_start:resp_end])
 
-            if loss_type == "bce":
-                prob = jax.nn.sigmoid(y_hat)
-                loss = -label * jnp.log(prob + 1e-7) - (1 - label) * jnp.log(1 - prob + 1e-7)
-            else:
-                if label_type == "pm1":
-                    pred = jnp.tanh(y_hat)
-                else:
-                    pred = jax.nn.sigmoid(y_hat)
-                loss = (pred - label) ** 2
+            # MSE loss for regression (target is now g_bar, not binary label)
+            loss = (y_hat - target) ** 2
 
             return y_hat, loss
 
-        y_hats, losses = jax.vmap(single_trial)(batch['u_seq'], batch['labels'])
+        y_hats, losses = jax.vmap(single_trial)(batch['u_seq'], batch['g_bars'])
         loss = jnp.mean(losses)
 
         return loss, y_hats
@@ -113,14 +106,11 @@ def make_train_step(model, dataset, rnn_cfg, task_cfg, training_cfg, n_iteration
         updates, opt_state = optimizer.update(grads, opt_state, trainable_params)
         trainable_params = optax.apply_updates(trainable_params, updates)
 
-        if label_type == "pm1":
-            preds = jnp.sign(y_hats)
-            acc = jnp.mean(preds == batch['labels'])
-        else:
-            preds = (jax.nn.sigmoid(y_hats) > 0.5).astype(jnp.float32)
-            acc = jnp.mean(preds == batch['labels'])
+        # Compute MSE and correlation for regression
+        mse = jnp.mean((y_hats - batch['g_bars']) ** 2)
+        correlation = jnp.corrcoef(y_hats, batch['g_bars'])[0, 1]
 
-        return trainable_params, opt_state, {'loss': loss, 'accuracy': acc}
+        return trainable_params, opt_state, {'loss': loss, 'mse': mse, 'correlation': correlation}
 
     return jax.jit(train_step), optimizer
 
@@ -143,51 +133,43 @@ def make_eval_step(model, dataset, rnn_cfg, task_cfg):
             J=trainable_params.get('J', fixed_params.get('J', None)),
         )
 
-        def single_trial(u_seq, label, context):
+        def single_trial(u_seq, target, context):
             _, ys = model.simulate_trial_fast(params, u_seq, dt)
             y_hat = jnp.mean(ys[resp_start:resp_end])
 
-            if loss_type == "bce":
-                prob = jax.nn.sigmoid(y_hat)
-                loss = -label * jnp.log(prob + 1e-7) - (1 - label) * jnp.log(1 - prob + 1e-7)
-            else:
-                if label_type == "pm1":
-                    pred = jnp.tanh(y_hat)
-                else:
-                    pred = jax.nn.sigmoid(y_hat)
-                loss = (pred - label) ** 2
+            # MSE loss for regression
+            loss = (y_hat - target) ** 2
 
             return y_hat, loss
 
-        y_hats, losses = jax.vmap(single_trial)(batch['u_seq'], batch['labels'], batch['contexts'])
+        y_hats, losses = jax.vmap(single_trial)(batch['u_seq'], batch['g_bars'], batch['contexts'])
         loss = jnp.mean(losses)
 
-        if label_type == "pm1":
-            preds = jnp.sign(y_hats)
-            acc = jnp.mean(preds == batch['labels'])
-        else:
-            preds = (jax.nn.sigmoid(y_hats) > 0.5).astype(jnp.float32)
-            acc = jnp.mean(preds == batch['labels'])
+        # Compute MSE and correlation
+        mse = jnp.mean((y_hats - batch['g_bars']) ** 2)
+        correlation = jnp.corrcoef(y_hats, batch['g_bars'])[0, 1]
 
+        # Compute MSE for different context ranges
         low_c_mask = batch['contexts'] < 0.5
         high_c_mask = batch['contexts'] >= 0.5
 
-        low_c_acc = jnp.where(
+        low_c_mse = jnp.where(
             jnp.sum(low_c_mask) > 0,
-            jnp.sum((preds == batch['labels']) * low_c_mask) / jnp.sum(low_c_mask),
+            jnp.sum(((y_hats - batch['g_bars']) ** 2) * low_c_mask) / jnp.sum(low_c_mask),
             0.0
         )
-        high_c_acc = jnp.where(
+        high_c_mse = jnp.where(
             jnp.sum(high_c_mask) > 0,
-            jnp.sum((preds == batch['labels']) * high_c_mask) / jnp.sum(high_c_mask),
+            jnp.sum(((y_hats - batch['g_bars']) ** 2) * high_c_mask) / jnp.sum(high_c_mask),
             0.0
         )
 
         return {
             'loss': loss,
-            'accuracy': acc,
-            'low_c_accuracy': low_c_acc,
-            'high_c_accuracy': high_c_acc,
+            'mse': mse,
+            'correlation': correlation,
+            'low_c_mse': low_c_mse,
+            'high_c_mse': high_c_mse,
         }
 
     return jax.jit(eval_step)
@@ -196,7 +178,6 @@ def make_eval_step(model, dataset, rnn_cfg, task_cfg):
 def make_trial_output_fn(model, dataset, task_cfg):
     """Create function to get full trial outputs and hidden states for plotting."""
     dt = dataset.dt
-    label_type = task_cfg.label_type
 
     def get_trial_outputs(trainable_params, fixed_params, u_seq):
         params = RNNParams(
@@ -210,10 +191,8 @@ def make_trial_output_fn(model, dataset, task_cfg):
         )
         xs, ys = model.simulate_trial_fast(params, u_seq, dt)
 
-        if label_type == "pm1":
-            return xs, jnp.tanh(ys)
-        else:
-            return xs, jax.nn.sigmoid(ys)
+        # For regression, return raw outputs (no sigmoid/tanh)
+        return xs, ys
 
     return jax.jit(get_trial_outputs)
 
@@ -267,7 +246,7 @@ def plot_network_performance(
         y_pred_np = np.array(y_pred)
         xs_np = np.array(xs)  # (n_steps, N)
         context = float(trial['context'])
-        label = float(trial['label'])
+        g_bar = float(trial['g_bar'])
         a1 = float(trial['a1'])
         a2 = float(trial['a2'])
 
@@ -303,6 +282,7 @@ def plot_network_performance(
         # Plot target and readout with thicker lines
         ax2.plot(times, y_time, 'k-', label='Target', linewidth=3)
         ax2.plot(times, y_pred_np, 'b-', label='Readout', linewidth=2.5)
+        ax2.axhline(g_bar, color='m', linestyle=':', alpha=0.7, linewidth=2)
         ax2.axvline(task_cfg.t_response_on, color='gray', linestyle='--', alpha=0.5)
         ax2.axvline(task_cfg.t_response_off, color='gray', linestyle='--', alpha=0.5)
         ax2.axvspan(task_cfg.t_response_on, task_cfg.t_response_off, alpha=0.1, color='green')
@@ -315,21 +295,18 @@ def plot_network_performance(
         # Compute prediction
         resp_start, resp_end = dataset.get_avg_window_indices()
         pred_val = float(np.mean(y_pred_np[resp_start:resp_end]))
-        pred_label = 1 if pred_val > 0.5 else 0
-        correct = "✓" if pred_label == label else "✗"
+        error = pred_val - g_bar
 
         # Plot 3: Response window detail
         ax3 = axes[i, 2]
         resp_times = times[resp_start:resp_end]
         ax3.plot(resp_times, y_time[resp_start:resp_end], 'k-', label='Target', linewidth=3)
         ax3.plot(resp_times, y_pred_np[resp_start:resp_end], 'b-', label='Readout', linewidth=2.5)
-        ax3.axhline(0.5, color='gray', linestyle='--', alpha=0.5)
-        ax3.set_ylabel('Output')
+        ax3.axhline(g_bar, color='m', linestyle=':', alpha=0.7, linewidth=2, label=f'g_bar={g_bar:.2f}')
+        ax3.set_ylabel('Output (g_bar)')
         ax3.set_xlabel('Time (s)')
-        ax3.set_ylim(-0.1, 1.1)
 
-        decision = "Go" if label > 0.5 else "No-Go"
-        ax3.set_title(f'{decision} | pred={pred_val:.2f} {correct}')
+        ax3.set_title(f'Target: {g_bar:.2f} | Pred: {pred_val:.2f} | Error: {error:.2f}')
         ax3.legend(loc='upper right', fontsize=8)
         ax3.grid(True, alpha=0.3)
 
@@ -437,12 +414,15 @@ def train(
     # Logs
     logs = {
         'train_loss': [],
-        'train_accuracy': [],
+        'train_mse': [],
+        'train_correlation': [],
         'val_loss': [],
-        'val_accuracy': [],
-        'val_low_c_accuracy': [],
-        'val_high_c_accuracy': [],
-        'test_accuracy': [],  # Held-out contexts
+        'val_mse': [],
+        'val_correlation': [],
+        'val_low_c_mse': [],
+        'val_high_c_mse': [],
+        'test_mse': [],  # Held-out contexts
+        'test_correlation': [],
         'epoch': [],
     }
 
@@ -459,7 +439,8 @@ def train(
     # Training loop
     for epoch in range(n_epochs):
         epoch_loss = 0.0
-        epoch_acc = 0.0
+        epoch_mse = 0.0
+        epoch_corr = 0.0
 
         for _ in range(iters_per_epoch):
             key, batch_key = jax.random.split(key)
@@ -470,13 +451,16 @@ def train(
             )
 
             epoch_loss += float(metrics['loss'])
-            epoch_acc += float(metrics['accuracy'])
+            epoch_mse += float(metrics['mse'])
+            epoch_corr += float(metrics['correlation'])
 
         avg_loss = epoch_loss / iters_per_epoch
-        avg_acc = epoch_acc / iters_per_epoch
+        avg_mse = epoch_mse / iters_per_epoch
+        avg_corr = epoch_corr / iters_per_epoch
 
         logs['train_loss'].append(avg_loss)
-        logs['train_accuracy'].append(avg_acc)
+        logs['train_mse'].append(avg_mse)
+        logs['train_correlation'].append(avg_corr)
         logs['epoch'].append(epoch + 1)
 
         # Evaluation on train contexts
@@ -485,29 +469,34 @@ def train(
         val_metrics = eval_step(trainable_params, fixed_params, val_batch)
 
         logs['val_loss'].append(float(val_metrics['loss']))
-        logs['val_accuracy'].append(float(val_metrics['accuracy']))
-        logs['val_low_c_accuracy'].append(float(val_metrics['low_c_accuracy']))
-        logs['val_high_c_accuracy'].append(float(val_metrics['high_c_accuracy']))
+        logs['val_mse'].append(float(val_metrics['mse']))
+        logs['val_correlation'].append(float(val_metrics['correlation']))
+        logs['val_low_c_mse'].append(float(val_metrics['low_c_mse']))
+        logs['val_high_c_mse'].append(float(val_metrics['high_c_mse']))
 
         # Evaluation on held-out test contexts
         if has_test_contexts:
             key, test_key = jax.random.split(key)
             test_batch = dataset.sample_batch(test_key, training_cfg.n_val_trials, use_test_contexts=True)
             test_metrics = eval_step(trainable_params, fixed_params, test_batch)
-            test_acc = float(test_metrics['accuracy'])
-            logs['test_accuracy'].append(test_acc)
+            test_mse = float(test_metrics['mse'])
+            test_corr = float(test_metrics['correlation'])
+            logs['test_mse'].append(test_mse)
+            logs['test_correlation'].append(test_corr)
         else:
-            test_acc = None
-            logs['test_accuracy'].append(float(val_metrics['accuracy']))
+            test_mse = None
+            test_corr = None
+            logs['test_mse'].append(float(val_metrics['mse']))
+            logs['test_correlation'].append(float(val_metrics['correlation']))
 
         if verbose:
             base_msg = (f"Epoch {epoch+1:3d}/{n_epochs}: "
-                       f"train_loss={avg_loss:.4f}, train_acc={avg_acc:.1%} | "
-                       f"val_acc={val_metrics['accuracy']:.1%}")
-            if has_test_contexts and test_acc is not None:
-                print(f"{base_msg} | test_acc={test_acc:.1%} (held-out)")
+                       f"train_loss={avg_loss:.4f}, train_r={avg_corr:.3f} | "
+                       f"val_mse={val_metrics['mse']:.4f}, val_r={val_metrics['correlation']:.3f}")
+            if has_test_contexts and test_mse is not None:
+                print(f"{base_msg} | test_mse={test_mse:.4f}, test_r={test_corr:.3f} (held-out)")
             else:
-                print(f"{base_msg} (c<0.5: {val_metrics['low_c_accuracy']:.1%}, c>=0.5: {val_metrics['high_c_accuracy']:.1%})")
+                print(f"{base_msg} (c<0.5: mse={val_metrics['low_c_mse']:.4f}, c>=0.5: mse={val_metrics['high_c_mse']:.4f})")
 
         # Plot every 10 epochs
         if (epoch + 1) % 10 == 0 or epoch == 0:
@@ -555,30 +544,41 @@ def save_results(params: RNNParams, logs: dict, output_dir: str):
 
 def plot_training_curves(logs: dict, output_dir: str):
     """Plot training curves."""
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
 
     epochs = logs['epoch']
 
-    # Loss
-    axes[0].plot(epochs, logs['train_loss'], 'b-', label='Train')
-    axes[0].plot(epochs, logs['val_loss'], 'r-', label='Val')
+    # MSE
+    axes[0].plot(epochs, logs['train_mse'], 'b-', label='Train')
+    axes[0].plot(epochs, logs['val_mse'], 'r-', label='Val')
+    if 'test_mse' in logs and len(logs['test_mse']) > 0:
+        axes[0].plot(epochs, logs['test_mse'], 'g-', label='Test (held-out)', alpha=0.7)
     axes[0].set_xlabel('Epoch')
-    axes[0].set_ylabel('Loss')
-    axes[0].set_title('Loss')
+    axes[0].set_ylabel('MSE')
+    axes[0].set_title('Mean Squared Error')
     axes[0].legend()
     axes[0].grid(True, alpha=0.3)
 
-    # Accuracy
-    axes[1].plot(epochs, logs['train_accuracy'], 'b-', label='Train')
-    axes[1].plot(epochs, logs['val_accuracy'], 'r-', label='Val')
-    axes[1].plot(epochs, logs['val_low_c_accuracy'], 'g--', label='Val (c<0.5)', alpha=0.7)
-    axes[1].plot(epochs, logs['val_high_c_accuracy'], 'm--', label='Val (c>=0.5)', alpha=0.7)
+    # Correlation
+    axes[1].plot(epochs, logs['train_correlation'], 'b-', label='Train')
+    axes[1].plot(epochs, logs['val_correlation'], 'r-', label='Val')
+    if 'test_correlation' in logs and len(logs['test_correlation']) > 0:
+        axes[1].plot(epochs, logs['test_correlation'], 'g-', label='Test (held-out)', alpha=0.7)
     axes[1].set_xlabel('Epoch')
-    axes[1].set_ylabel('Accuracy')
-    axes[1].set_title('Accuracy')
+    axes[1].set_ylabel('Correlation')
+    axes[1].set_title('Prediction-Target Correlation')
     axes[1].legend()
     axes[1].grid(True, alpha=0.3)
     axes[1].set_ylim(0, 1.05)
+
+    # MSE by context range
+    axes[2].plot(epochs, logs['val_low_c_mse'], 'g-', label='Val (c<0.5)')
+    axes[2].plot(epochs, logs['val_high_c_mse'], 'm-', label='Val (c>=0.5)')
+    axes[2].set_xlabel('Epoch')
+    axes[2].set_ylabel('MSE')
+    axes[2].set_title('MSE by Context Range')
+    axes[2].legend()
+    axes[2].grid(True, alpha=0.3)
 
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'training_curves.png'), dpi=150, bbox_inches='tight')
@@ -638,7 +638,8 @@ def main():
 
     if not args.quiet:
         print(f"\nResults saved to {output_dir}")
-        print(f"Final validation accuracy: {logs['val_accuracy'][-1]:.1%}")
+        print(f"Final validation MSE: {logs['val_mse'][-1]:.4f}")
+        print(f"Final validation correlation: {logs['val_correlation'][-1]:.3f}")
         print(f"Training curves: {output_dir}/training_curves.png")
         print(f"Performance plots: {output_dir}/figs/")
 
