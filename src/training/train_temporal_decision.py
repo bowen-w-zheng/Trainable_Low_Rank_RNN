@@ -398,8 +398,12 @@ def train(
         'val_accuracy': [],
         'val_low_c_accuracy': [],
         'val_high_c_accuracy': [],
+        'test_accuracy': [],  # Held-out contexts
         'epoch': [],
     }
+
+    # Check if we have held-out contexts
+    has_test_contexts = task_cfg.test_contexts is not None
 
     if verbose:
         print(f"\nStarting training for {n_epochs} epochs")
@@ -431,9 +435,9 @@ def train(
         logs['train_accuracy'].append(avg_acc)
         logs['epoch'].append(epoch + 1)
 
-        # Evaluation
+        # Evaluation on train contexts
         key, eval_key = jax.random.split(key)
-        val_batch = dataset.sample_batch(eval_key, training_cfg.n_val_trials)
+        val_batch = dataset.sample_batch(eval_key, training_cfg.n_val_trials, use_test_contexts=False)
         val_metrics = eval_step(trainable_params, fixed_params, val_batch)
 
         logs['val_loss'].append(float(val_metrics['loss']))
@@ -441,11 +445,25 @@ def train(
         logs['val_low_c_accuracy'].append(float(val_metrics['low_c_accuracy']))
         logs['val_high_c_accuracy'].append(float(val_metrics['high_c_accuracy']))
 
+        # Evaluation on held-out test contexts
+        if has_test_contexts:
+            key, test_key = jax.random.split(key)
+            test_batch = dataset.sample_batch(test_key, training_cfg.n_val_trials, use_test_contexts=True)
+            test_metrics = eval_step(trainable_params, fixed_params, test_batch)
+            test_acc = float(test_metrics['accuracy'])
+            logs['test_accuracy'].append(test_acc)
+        else:
+            test_acc = None
+            logs['test_accuracy'].append(float(val_metrics['accuracy']))
+
         if verbose:
-            print(f"Epoch {epoch+1:3d}/{n_epochs}: "
-                  f"train_loss={avg_loss:.4f}, train_acc={avg_acc:.1%} | "
-                  f"val_loss={val_metrics['loss']:.4f}, val_acc={val_metrics['accuracy']:.1%} "
-                  f"(c<0.5: {val_metrics['low_c_accuracy']:.1%}, c>=0.5: {val_metrics['high_c_accuracy']:.1%})")
+            base_msg = (f"Epoch {epoch+1:3d}/{n_epochs}: "
+                       f"train_loss={avg_loss:.4f}, train_acc={avg_acc:.1%} | "
+                       f"val_acc={val_metrics['accuracy']:.1%}")
+            if has_test_contexts and test_acc is not None:
+                print(f"{base_msg} | test_acc={test_acc:.1%} (held-out)")
+            else:
+                print(f"{base_msg} (c<0.5: {val_metrics['low_c_accuracy']:.1%}, c>=0.5: {val_metrics['high_c_accuracy']:.1%})")
 
         # Plot every 10 epochs
         if (epoch + 1) % 10 == 0 or epoch == 0:
