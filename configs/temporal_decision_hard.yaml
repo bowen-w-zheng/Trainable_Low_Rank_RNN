@@ -2,9 +2,9 @@ name: temporal_decision_hard
 description: Harder configuration with noise and held-out contexts for generalization testing
 
 rnn:
-  N: 100
+  N: 500
   R: 2
-  g: 0.8
+  g: 2
   tau: 0.1
   phi: tanh
   d_in: 3
@@ -24,7 +24,7 @@ integrator:
   atol: 1.0e-06
 
 training:
-  batch_size: 64
+  batch_size: 256
   n_epochs: 100
   learning_rate: 0.001
   weight_decay: 0.0
@@ -59,5 +59,5 @@ task:
   label_type: binary
   loss_type: bce
   # Train on discrete contexts, test on held-out intermediate values
-  train_contexts: [0.0, 0.25, 0.5, 0.75, 1.0]
+  train_contexts: [0.0, 0.33, 0.66, 1.0]
   test_contexts: [0.125, 0.375, 0.625, 0.875]

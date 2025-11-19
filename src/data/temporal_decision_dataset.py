@@ -148,7 +148,7 @@ class TemporalDecisionDataset:
         # Note: use clean signal for computing label (before noise)
         u1_clean = jnp.zeros(self.n_steps).at[self.stim_on_idx:self.stim_off_idx].set(a1)
         u2_clean = jnp.zeros(self.n_steps).at[self.stim_on_idx:self.stim_off_idx].set(a2)
-        g = (1 - context) * u1_clean + context * u2_clean
+        g = (1 - 2*context) * u1_clean + (2*context - 1) * u2_clean
 
         # Compute average evidence over stimulus window
         g_stim = g[self.stim_on_idx:self.stim_off_idx]
