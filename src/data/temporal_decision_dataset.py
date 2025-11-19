@@ -29,6 +29,9 @@ class TemporalDecisionTaskConfig:
     mu2: float = 0.0  # Mean of stimulus 2
     sigma2: float = 1.0  # Std of stimulus 2
 
+    # Input noise
+    input_noise_std: float = 0.0  # Temporal noise on input signals
+
     # Decision threshold
     theta: float = 0.0  # Threshold for Go/No-Go
 
@@ -37,6 +40,12 @@ class TemporalDecisionTaskConfig:
 
     # Loss type
     loss_type: str = "bce"  # "bce" or "mse"
+
+    # Context sampling for train/test split
+    # If None, sample uniformly from [0, 1]
+    # Otherwise, sample from these discrete values
+    train_contexts: tuple = None  # e.g., (0.0, 0.25, 0.5, 0.75, 1.0)
+    test_contexts: tuple = None   # e.g., (0.125, 0.375, 0.625, 0.875)
 
 
 class TemporalDecisionDataset:
@@ -92,12 +101,13 @@ class TemporalDecisionDataset:
         # Number of steps in stimulus window
         self.n_stim_steps = self.stim_off_idx - self.stim_on_idx
 
-    def sample_trial(self, key: jax.random.PRNGKey) -> Dict[str, jnp.ndarray]:
+    def sample_trial(self, key: jax.random.PRNGKey, use_test_contexts: bool = False) -> Dict[str, jnp.ndarray]:
         """
         Sample a single trial.
 
         Args:
             key: Random key for sampling
+            use_test_contexts: If True, sample from test_contexts instead of train_contexts
 
         Returns:
             Dictionary with:
@@ -110,22 +120,35 @@ class TemporalDecisionDataset:
                 - a2: Stimulus 2 amplitude
                 - g_bar: Average evidence
         """
-        keys = jax.random.split(key, 3)
+        keys = jax.random.split(key, 4)
 
-        # Sample context c ~ Uniform(0, 1)
-        context = jax.random.uniform(keys[0], ())
+        # Sample context
+        if use_test_contexts and self.task_cfg.test_contexts is not None:
+            # Sample from test contexts (held-out)
+            contexts = jnp.array(self.task_cfg.test_contexts)
+            idx = jax.random.randint(keys[0], (), 0, len(contexts))
+            context = contexts[idx]
+        elif not use_test_contexts and self.task_cfg.train_contexts is not None:
+            # Sample from train contexts
+            contexts = jnp.array(self.task_cfg.train_contexts)
+            idx = jax.random.randint(keys[0], (), 0, len(contexts))
+            context = contexts[idx]
+        else:
+            # Sample uniformly from [0, 1]
+            context = jax.random.uniform(keys[0], ())
 
         # Sample stimulus amplitudes
         a1 = jax.random.normal(keys[1], ()) * self.task_cfg.sigma1 + self.task_cfg.mu1
         a2 = jax.random.normal(keys[2], ()) * self.task_cfg.sigma2 + self.task_cfg.mu2
 
-        # Build input sequence
-        u_seq = self._build_input_sequence(a1, a2, context)
+        # Build input sequence (with noise)
+        u_seq = self._build_input_sequence(a1, a2, context, keys[3])
 
         # Compute evidence g(t) = (1-c)*u1(t) + c*u2(t)
-        u1 = u_seq[:, 0]
-        u2 = u_seq[:, 1]
-        g = (1 - context) * u1 + context * u2
+        # Note: use clean signal for computing label (before noise)
+        u1_clean = jnp.zeros(self.n_steps).at[self.stim_on_idx:self.stim_off_idx].set(a1)
+        u2_clean = jnp.zeros(self.n_steps).at[self.stim_on_idx:self.stim_off_idx].set(a2)
+        g = (1 - context) * u1_clean + context * u2_clean
 
         # Compute average evidence over stimulus window
         g_stim = g[self.stim_on_idx:self.stim_off_idx]
@@ -214,7 +237,8 @@ class TemporalDecisionDataset:
         self,
         a1: float,
         a2: float,
-        context: float
+        context: float,
+        noise_key: Optional[jax.random.PRNGKey] = None
     ) -> jnp.ndarray:
         """
         Build input sequence for a trial.
@@ -223,6 +247,7 @@ class TemporalDecisionDataset:
             a1: Stimulus 1 amplitude
             a2: Stimulus 2 amplitude
             context: Context value
+            noise_key: Optional key for generating input noise
 
         Returns:
             u_seq: Input sequence (n_steps, 3)
@@ -236,6 +261,14 @@ class TemporalDecisionDataset:
         # Set stimuli only during stimulus window
         u_seq = u_seq.at[self.stim_on_idx:self.stim_off_idx, 0].set(a1)
         u_seq = u_seq.at[self.stim_on_idx:self.stim_off_idx, 1].set(a2)
+
+        # Add temporal noise to stimulus channels
+        if noise_key is not None and self.task_cfg.input_noise_std > 0:
+            noise = jax.random.normal(noise_key, (self.n_steps, 2)) * self.task_cfg.input_noise_std
+            # Only add noise during stimulus window
+            noise_mask = jnp.zeros((self.n_steps, 2))
+            noise_mask = noise_mask.at[self.stim_on_idx:self.stim_off_idx, :].set(1.0)
+            u_seq = u_seq.at[:, :2].add(noise * noise_mask)
 
         return u_seq
 
@@ -261,7 +294,8 @@ class TemporalDecisionDataset:
     def sample_batch(
         self,
         key: jax.random.PRNGKey,
-        batch_size: int
+        batch_size: int,
+        use_test_contexts: bool = False
     ) -> Dict[str, jnp.ndarray]:
         """
         Sample a batch of trials.
@@ -269,6 +303,7 @@ class TemporalDecisionDataset:
         Args:
             key: Random key
             batch_size: Number of trials
+            use_test_contexts: If True, sample from test_contexts (held-out)
 
         Returns:
             Batched dictionary with:
@@ -283,8 +318,10 @@ class TemporalDecisionDataset:
         """
         keys = jax.random.split(key, batch_size)
 
-        # Vectorize sample_trial
-        batch_fn = jax.vmap(self.sample_trial)
+        # Vectorize sample_trial with use_test_contexts
+        from functools import partial
+        sample_fn = partial(self.sample_trial, use_test_contexts=use_test_contexts)
+        batch_fn = jax.vmap(sample_fn)
         batch = batch_fn(keys)
 
         return {
