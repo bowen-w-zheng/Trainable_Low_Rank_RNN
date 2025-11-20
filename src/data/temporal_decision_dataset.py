@@ -148,8 +148,7 @@ class TemporalDecisionDataset:
         # Note: use clean signal for computing label (before noise)
         u1_clean = jnp.zeros(self.n_steps).at[self.stim_on_idx:self.stim_off_idx].set(a1)
         u2_clean = jnp.zeros(self.n_steps).at[self.stim_on_idx:self.stim_off_idx].set(a2)
-        g = (1 - 2*context) * u1_clean + (2*context - 1) * u2_clean
-        g = g/2
+        g = (1 - context) * u1_clean + (context) * u2_clean
 
         # Compute average evidence over stimulus window
         g_stim = g[self.stim_on_idx:self.stim_off_idx]
@@ -208,8 +207,7 @@ class TemporalDecisionDataset:
         # Compute evidence using clean signal (before noise)
         u1_clean = jnp.zeros(self.n_steps).at[self.stim_on_idx:self.stim_off_idx].set(a1)
         u2_clean = jnp.zeros(self.n_steps).at[self.stim_on_idx:self.stim_off_idx].set(a2)
-        g = (1 - 2*context) * u1_clean + (2*context - 1) * u2_clean
-        g = g/2
+        g = (1 - context) * u1_clean + (context) * u2_clean
         # Compute average evidence over stimulus window
         g_stim = g[self.stim_on_idx:self.stim_off_idx]
         g_bar = jnp.mean(g_stim)
@@ -393,8 +391,7 @@ def plot_single_trial(
     c = u_seq[:, 2]
 
     # Compute evidence
-    g = (1 - 2*context) * u1 + (2*context - 1) * u2
-    g = g/2
+    g = (1 - context) * u1 + (context) * u2
     # Create figure with 3 subplots
     fig, axes = plt.subplots(3, 1, figsize=figsize, sharex=True)
 
@@ -499,8 +496,7 @@ def plot_interpolation_comparison(
         # Extract signals
         u1 = u_seq[:, 0]
         u2 = u_seq[:, 1]
-        g = (1 - 2*context) * u1 + (2*context - 1) * u2
-        g = g/2
+        g = (1 - context) * u1 + (context) * u2
 
         # Row 1: Stimulus features
         ax1 = axes[0, col]

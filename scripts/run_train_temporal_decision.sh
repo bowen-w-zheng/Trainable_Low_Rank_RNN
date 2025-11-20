@@ -10,7 +10,7 @@ for pid in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader); do
 done
 
 # Default values
-CONFIG="${1:-configs/temporal_decision_hard_full_rank.yaml}"
+CONFIG="${1:-configs/temporal_decision_R1.yaml}"
 OUTPUT="${2:-results}"
 
 # Set PYTHONPATH

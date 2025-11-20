@@ -3,7 +3,7 @@ description: Harder configuration with noise and held-out contexts for generaliz
 
 rnn:
   N: 500
-  R: 4
+  R: 1
   g: 2
   tau: 0.1
   phi: tanh
