@@ -2,9 +2,9 @@ name: temporal_decision_hard
 description: Harder configuration with noise and held-out contexts for generalization testing
 
 rnn:
-  N: 100
-  R: 2
-  g: 0.8
+  N: 500
+  R: 4
+  g: 2
   tau: 0.1
   phi: tanh
   d_in: 3
@@ -16,7 +16,7 @@ rnn:
   J_init_std: 1.0
 
 integrator:
-  dt: 0.01
+  dt: 0.005
   T: 1.0
   solver_name: euler
   save_every: 1
@@ -24,11 +24,11 @@ integrator:
   atol: 1.0e-06
 
 training:
-  batch_size: 64
+  batch_size: 256
   n_epochs: 100
   learning_rate: 0.001
   weight_decay: 0.0
-  seed: 42
+  seed: 0
   log_every: 10
   eval_every: 10
   n_train_trials: 10000
@@ -44,20 +44,20 @@ training:
   checkpoint_dir: checkpoints
 
 task:
-  dt: 0.01
-  T_trial: 1.0
+  dt: 0.005
+  T_trial: 1.5
   t_stim_on: 0.2
   t_stim_off: 0.7
-  t_response_on: 0.8
-  t_response_off: 1.0
+  t_response_on: 1.0
+  t_response_off: 1.5
   mu1: 0.0
   sigma1: 1.0
   mu2: 0.0
   sigma2: 1.0
-  input_noise_std: 0.2  # Add temporal noise to inputs
+  input_noise_std: 0.3  # Add temporal noise to inputs
   theta: 0.0
   label_type: binary  # Legacy field, not used for regression
   loss_type: mse  # MSE loss for regression
-  # Train on continuous context ranges, hold out intermediate ranges for testing
-  train_context_ranges: [[0.0, 0.2], [0.4, 0.6], [0.8, 1.0]]
-  test_context_ranges: [[0.2, 0.4], [0.6, 0.8]]
+  # Train on discrete contexts, test on held-out intermediate values
+  train_contexts: [0.0, 0.33, 0.66, 1.0]
+  test_contexts: [0.125, 0.375, 0.625, 0.875]
