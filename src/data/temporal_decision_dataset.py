@@ -42,10 +42,16 @@ class TemporalDecisionTaskConfig:
     loss_type: str = "mse"  # "mse" for regression, "bce" for classification
 
     # Context sampling for train/test split
-    # If None, sample uniformly from [0, 1]
-    # Otherwise, sample from these discrete values
+    # Option 1: Discrete values (legacy)
     train_contexts: tuple = None  # e.g., (0.0, 0.25, 0.5, 0.75, 1.0)
     test_contexts: tuple = None   # e.g., (0.125, 0.375, 0.625, 0.875)
+
+    # Option 2: Continuous ranges (preferred)
+    # Sample uniformly from specified ranges, with held-out ranges for testing
+    train_context_ranges: tuple = None  # e.g., ((0.0, 0.2), (0.4, 0.6), (0.8, 1.0))
+    test_context_ranges: tuple = None   # e.g., ((0.2, 0.4), (0.6, 0.8))
+
+    # If both are None, sample uniformly from [0, 1]
 
 
 class TemporalDecisionDataset:
@@ -123,13 +129,20 @@ class TemporalDecisionDataset:
         keys = jax.random.split(key, 4)
 
         # Sample context
-        if use_test_contexts and self.task_cfg.test_contexts is not None:
-            # Sample from test contexts (held-out)
+        # Priority: ranges > discrete values > uniform [0, 1]
+        if use_test_contexts and self.task_cfg.test_context_ranges is not None:
+            # Sample uniformly from one of the test ranges (held-out)
+            context = self._sample_from_ranges(keys[0], self.task_cfg.test_context_ranges)
+        elif not use_test_contexts and self.task_cfg.train_context_ranges is not None:
+            # Sample uniformly from one of the train ranges
+            context = self._sample_from_ranges(keys[0], self.task_cfg.train_context_ranges)
+        elif use_test_contexts and self.task_cfg.test_contexts is not None:
+            # Sample from discrete test contexts (legacy)
             contexts = jnp.array(self.task_cfg.test_contexts)
             idx = jax.random.randint(keys[0], (), 0, len(contexts))
             context = contexts[idx]
         elif not use_test_contexts and self.task_cfg.train_contexts is not None:
-            # Sample from train contexts
+            # Sample from discrete train contexts (legacy)
             contexts = jnp.array(self.task_cfg.train_contexts)
             idx = jax.random.randint(keys[0], (), 0, len(contexts))
             context = contexts[idx]
@@ -290,6 +303,36 @@ class TemporalDecisionDataset:
         y_time = y_time.at[self.response_on_idx:self.response_off_idx].set(g_bar)
 
         return y_time
+
+    def _sample_from_ranges(
+        self,
+        key: jax.random.PRNGKey,
+        ranges: tuple
+    ) -> float:
+        """
+        Sample a value uniformly from one of the specified ranges.
+
+        Args:
+            key: Random key
+            ranges: Tuple of (min, max) tuples specifying ranges
+
+        Returns:
+            Sampled value
+        """
+        keys = jax.random.split(key, 2)
+
+        # Randomly pick one of the ranges
+        range_idx = jax.random.randint(keys[0], (), 0, len(ranges))
+        selected_range = ranges[range_idx]
+
+        # Sample uniformly from the selected range
+        value = jax.random.uniform(
+            keys[1], (),
+            minval=selected_range[0],
+            maxval=selected_range[1]
+        )
+
+        return value
 
     def sample_batch(
         self,
