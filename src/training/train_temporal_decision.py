@@ -221,7 +221,8 @@ def plot_network_performance(
     get_trial_outputs = make_trial_output_fn(model, dataset, task_cfg)
 
     # Determine how to split trials between train and test contexts
-    has_test_contexts = task_cfg.test_contexts is not None
+    has_test_contexts = (task_cfg.test_contexts is not None or
+                          task_cfg.test_context_ranges is not None)
     if has_test_contexts:
         n_train_trials = (n_trials + 1) // 2  # First half from train
         n_test_trials = n_trials - n_train_trials  # Second half from test
@@ -325,9 +326,17 @@ def plot_network_performance(
     # Create title with context info
     title = f'Network Performance - Epoch {epoch}'
     if has_test_contexts:
-        train_ctx_str = ', '.join([f'{c:.2f}' for c in task_cfg.train_contexts])
-        test_ctx_str = ', '.join([f'{c:.2f}' for c in task_cfg.test_contexts])
-        title += f'\nTrain contexts: [{train_ctx_str}] | Held-out: [{test_ctx_str}]'
+        # Check if using ranges or discrete values
+        if task_cfg.train_context_ranges is not None and task_cfg.test_context_ranges is not None:
+            # Format ranges as [min, max]
+            train_ranges_str = ', '.join([f'[{r[0]:.1f}, {r[1]:.1f}]' for r in task_cfg.train_context_ranges])
+            test_ranges_str = ', '.join([f'[{r[0]:.1f}, {r[1]:.1f}]' for r in task_cfg.test_context_ranges])
+            title += f'\nTrain ranges: {train_ranges_str} | Held-out: {test_ranges_str}'
+        else:
+            # Discrete values (legacy)
+            train_ctx_str = ', '.join([f'{c:.2f}' for c in task_cfg.train_contexts])
+            test_ctx_str = ', '.join([f'{c:.2f}' for c in task_cfg.test_contexts])
+            title += f'\nTrain contexts: [{train_ctx_str}] | Held-out: [{test_ctx_str}]'
 
     fig.suptitle(title, fontsize=12, fontweight='bold')
     plt.tight_layout()
@@ -438,8 +447,9 @@ def train(
         'epoch': [],
     }
 
-    # Check if we have held-out contexts
-    has_test_contexts = task_cfg.test_contexts is not None
+    # Check if we have held-out contexts (either discrete values or ranges)
+    has_test_contexts = (task_cfg.test_contexts is not None or
+                          task_cfg.test_context_ranges is not None)
 
     if verbose:
         print(f"\nStarting training for {n_epochs} epochs")
