@@ -320,9 +320,12 @@ class TemporalDecisionDataset:
         """
         keys = jax.random.split(key, 2)
 
+        # Convert ranges to JAX array for indexing (required for traced execution)
+        ranges_array = jnp.array(ranges)  # Shape: (n_ranges, 2)
+
         # Randomly pick one of the ranges
         range_idx = jax.random.randint(keys[0], (), 0, len(ranges))
-        selected_range = ranges[range_idx]
+        selected_range = ranges_array[range_idx]
 
         # Sample uniformly from the selected range
         value = jax.random.uniform(
