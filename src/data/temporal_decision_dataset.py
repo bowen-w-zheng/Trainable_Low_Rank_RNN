@@ -159,9 +159,15 @@ class TemporalDecisionDataset:
             # Sample uniformly from [0, 1]
             context = jax.random.uniform(keys[0], ())
 
-        # Sample stimulus amplitudes uniformly from [-1, 1]
-        a1 = jax.random.uniform(keys[1], (), minval=-1.0, maxval=1.0)
-        a2 = jax.random.uniform(keys[2], (), minval=-1.0, maxval=1.0)
+        # NEW SAMPLING STRATEGY: Sample g_bar_linear uniformly, then compute a1, a2
+        # This ensures uniform distribution of targets instead of peaked at zero
+
+        # Sample target g_bar_linear uniformly from [-1, 1]
+        g_bar_linear = jax.random.uniform(keys[1], (), minval=-1.0, maxval=1.0)
+
+        # Compute a1, a2 such that g_bar_linear = (1-c)*a1 + c*a2
+        # We need both a1, a2 ∈ [-1, 1]
+        a1, a2 = self._sample_stimuli_from_target(keys[2], g_bar_linear, context)
 
         # Build input sequence (with noise)
         u_seq = self._build_input_sequence(a1, a2, context, keys[3])
@@ -172,9 +178,9 @@ class TemporalDecisionDataset:
         u2_clean = jnp.zeros(self.n_steps).at[self.stim_on_idx:self.stim_off_idx].set(a2)
         g = (1 - context) * u1_clean + (context) * u2_clean
 
-        # Compute average evidence over stimulus window
+        # Verify g_bar_linear (should match sampled value)
         g_stim = g[self.stim_on_idx:self.stim_off_idx]
-        g_bar_linear = jnp.mean(g_stim)
+        g_bar_linear_computed = jnp.mean(g_stim)
 
         # Apply nonlinearity to get final target
         g_bar = self._apply_nonlinearity(g_bar_linear)
@@ -375,6 +381,90 @@ class TemporalDecisionDataset:
         )
 
         return value
+
+    def _sample_stimuli_from_target(
+        self,
+        key: jax.random.PRNGKey,
+        g_bar_linear: float,
+        context: float
+    ) -> Tuple[float, float]:
+        """
+        Sample stimulus amplitudes a1, a2 such that g_bar_linear = (1-c)*a1 + c*a2.
+
+        Strategy:
+        1. Compute valid range for a1 such that a2 ∈ [-1, 1]
+        2. Sample a1 uniformly from valid range
+        3. Compute a2 = (g_bar_linear - (1-c)*a1) / c
+
+        Args:
+            key: Random key
+            g_bar_linear: Target integrated evidence (linear, before nonlinearity)
+            context: Context value c ∈ [0, 1]
+
+        Returns:
+            (a1, a2): Stimulus amplitudes
+        """
+        # Handle special cases
+        # Case 1: c = 0 → g_bar_linear = a1
+        # Case 2: c = 1 → g_bar_linear = a2
+        # Case 3: 0 < c < 1 → compute valid range for a1
+
+        # For numerical stability, treat values close to 0 or 1 as exact
+        eps = 1e-6
+
+        # Case 1: c ≈ 0
+        a1_case1 = jnp.clip(g_bar_linear, -1.0, 1.0)
+        a2_case1 = jax.random.uniform(key, (), minval=-1.0, maxval=1.0)
+
+        # Case 2: c ≈ 1
+        a1_case2 = jax.random.uniform(key, (), minval=-1.0, maxval=1.0)
+        a2_case2 = jnp.clip(g_bar_linear, -1.0, 1.0)
+
+        # Case 3: 0 < c < 1
+        # For a2 ∈ [-1, 1], we need:
+        #   -1 ≤ (g_bar_linear - (1-c)*a1) / c ≤ 1
+        #   -c ≤ g_bar_linear - (1-c)*a1 ≤ c
+        #   g_bar_linear - c ≤ (1-c)*a1 ≤ g_bar_linear + c
+        #   (g_bar_linear - c)/(1-c) ≤ a1 ≤ (g_bar_linear + c)/(1-c)
+
+        a1_min = (g_bar_linear - context) / (1 - context + eps)
+        a1_max = (g_bar_linear + context) / (1 - context + eps)
+
+        # Clip to [-1, 1]
+        a1_min = jnp.clip(a1_min, -1.0, 1.0)
+        a1_max = jnp.clip(a1_max, -1.0, 1.0)
+
+        # Sample a1 from valid range
+        a1_case3 = jax.random.uniform(key, (), minval=a1_min, maxval=a1_max)
+
+        # Compute a2
+        a2_case3 = (g_bar_linear - (1 - context) * a1_case3) / (context + eps)
+        a2_case3 = jnp.clip(a2_case3, -1.0, 1.0)  # Clip for numerical safety
+
+        # Select based on context value
+        # Use jax.lax.cond for better JIT compilation
+        def near_zero(args):
+            return a1_case1, a2_case1
+
+        def near_one(args):
+            return a1_case2, a2_case2
+
+        def middle(args):
+            return a1_case3, a2_case3
+
+        # Check conditions
+        is_near_zero = context < eps
+        is_near_one = context > (1 - eps)
+
+        # Use nested conditionals
+        a1, a2 = jax.lax.cond(
+            is_near_zero,
+            near_zero,
+            lambda args: jax.lax.cond(is_near_one, near_one, middle, args),
+            None
+        )
+
+        return a1, a2
 
     def sample_batch(
         self,
