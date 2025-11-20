@@ -61,3 +61,5 @@ task:
   # Train on continuous context ranges, hold out intermediate ranges for testing
   train_context_ranges: [[0.0, 0.2], [0.4, 0.6], [0.8, 1.0]]
   test_context_ranges: [[0.2, 0.4], [0.6, 0.8]]
+  target_nonlinearity: none
+  target_nonlinearity_power: 2.0

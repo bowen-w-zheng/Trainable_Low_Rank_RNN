@@ -180,6 +180,8 @@ def make_eval_step(model, dataset, rnn_cfg, task_cfg):
             'correlation': correlation,
             'low_c_mse': low_c_mse,
             'high_c_mse': high_c_mse,
+            'predictions': y_hats,
+            'targets': batch['g_bars'],
         }
 
     return jax.jit(eval_step)
@@ -530,6 +532,26 @@ def train(
             if verbose:
                 print(f"  -> Saved performance plot: {plot_path}")
 
+            # Create scatter plots for train and test predictions
+            # Train scatter
+            plot_scatter_correlation(
+                np.array(val_metrics['predictions']),
+                np.array(val_metrics['targets']),
+                f'Train Correlation - Epoch {epoch + 1}',
+                figs_dir,
+                f'scatter_train_epoch_{epoch+1:03d}.png'
+            )
+
+            # Test scatter (if available)
+            if has_test_contexts:
+                plot_scatter_correlation(
+                    np.array(test_metrics['predictions']),
+                    np.array(test_metrics['targets']),
+                    f'Test (Held-out) Correlation - Epoch {epoch + 1}',
+                    figs_dir,
+                    f'scatter_test_epoch_{epoch+1:03d}.png'
+                )
+
     # Final params
     final_params = RNNParams(
         C=fixed_params['C'],
@@ -605,6 +627,55 @@ def plot_training_curves(logs: dict, output_dir: str):
 
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'training_curves.png'), dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+
+def plot_scatter_correlation(
+    predictions: np.ndarray,
+    targets: np.ndarray,
+    title: str,
+    output_dir: str,
+    filename: str
+):
+    """
+    Plot scatter plot of predictions vs targets to visualize correlation.
+
+    Args:
+        predictions: Network predictions (n_trials,)
+        targets: Ground truth targets (n_trials,)
+        title: Plot title
+        output_dir: Directory to save plot
+        filename: Filename for plot
+    """
+    fig, ax = plt.subplots(1, 1, figsize=(6, 6))
+
+    # Scatter plot
+    ax.scatter(targets, predictions, alpha=0.5, s=20, edgecolors='none')
+
+    # Diagonal line (perfect prediction)
+    lim_min = min(targets.min(), predictions.min())
+    lim_max = max(targets.max(), predictions.max())
+    ax.plot([lim_min, lim_max], [lim_min, lim_max], 'r--', linewidth=2, label='Perfect')
+
+    # Compute metrics
+    mse = np.mean((predictions - targets) ** 2)
+    correlation = np.corrcoef(predictions, targets)[0, 1]
+
+    # Add text with metrics
+    ax.text(0.05, 0.95, f'MSE: {mse:.4f}\nCorr: {correlation:.3f}',
+            transform=ax.transAxes, verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
+            fontsize=10)
+
+    ax.set_xlabel('Target g_bar', fontsize=12)
+    ax.set_ylabel('Predicted g_bar', fontsize=12)
+    ax.set_title(title, fontsize=12, fontweight='bold')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.set_aspect('equal', adjustable='box')
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, filename), dpi=150, bbox_inches='tight')
     plt.close(fig)
 
 

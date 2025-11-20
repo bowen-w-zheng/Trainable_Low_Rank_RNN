@@ -58,6 +58,9 @@ task:
   theta: 0.0
   label_type: binary  # Legacy field, not used for regression
   loss_type: mse  # MSE loss for regression
+  # Nonlinearity options: "none", "quadratic", "cubic", "power"
+  target_nonlinearity: cubic  # Apply cubic nonlinearity to target g_bar
+  target_nonlinearity_power: 2.0  # Used when target_nonlinearity="power"
   # Train on continuous context ranges, hold out intermediate ranges for testing
   train_context_ranges: [[0.0, 0.2], [0.4, 0.6], [0.8, 1.0]]
   test_context_ranges: [[0.2, 0.4], [0.6, 0.8]]

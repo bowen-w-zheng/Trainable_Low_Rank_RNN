@@ -57,3 +57,5 @@ task:
   theta: 0.0
   label_type: binary  # Legacy field, not used for regression
   loss_type: mse  # MSE loss for regression
+  target_nonlinearity: none
+  target_nonlinearity_power: 2.0
