@@ -32,6 +32,15 @@ class TemporalDecisionTaskConfig:
     # Input noise (temporal Gaussian noise added on top of uniform stimulus)
     input_noise_std: float = 0.0  # Temporal noise on input signals (Gaussian)
 
+    # Nonlinearity applied to target g_bar
+    # Options: "none", "quadratic", "cubic", "power"
+    # - "none": g_bar stays linear (no transform)
+    # - "quadratic": sign(g_bar) * g_bar^2 (preserves sign, makes values smaller)
+    # - "cubic": g_bar^3 (strong nonlinearity, preserves sign)
+    # - "power": sign(g_bar) * |g_bar|^p (configurable power)
+    target_nonlinearity: str = "none"
+    target_nonlinearity_power: float = 2.0  # Used when target_nonlinearity="power"
+
     # Decision threshold
     theta: float = 0.0  # Threshold for Go/No-Go
 
@@ -165,15 +174,18 @@ class TemporalDecisionDataset:
 
         # Compute average evidence over stimulus window
         g_stim = g[self.stim_on_idx:self.stim_off_idx]
-        g_bar = jnp.mean(g_stim)
+        g_bar_linear = jnp.mean(g_stim)
 
-        # Compute trial label (legacy, for compatibility)
-        label = (g_bar > self.task_cfg.theta).astype(jnp.float32)
+        # Apply nonlinearity to get final target
+        g_bar = self._apply_nonlinearity(g_bar_linear)
+
+        # Compute trial label (legacy, for compatibility) - use linear g_bar for threshold
+        label = (g_bar_linear > self.task_cfg.theta).astype(jnp.float32)
 
         if self.task_cfg.label_type == "pm1":
             label = 2 * label - 1  # Map 0 -> -1, 1 -> 1
 
-        # Build time-resolved target (now uses g_bar instead of binary label)
+        # Build time-resolved target (now uses transformed g_bar)
         y_time = self._build_target_sequence(g_bar)
 
         return {
@@ -223,15 +235,18 @@ class TemporalDecisionDataset:
         g = (1 - context) * u1_clean + (context) * u2_clean
         # Compute average evidence over stimulus window
         g_stim = g[self.stim_on_idx:self.stim_off_idx]
-        g_bar = jnp.mean(g_stim)
+        g_bar_linear = jnp.mean(g_stim)
 
-        # Compute trial label (legacy, for compatibility)
-        label = (g_bar > self.task_cfg.theta).astype(jnp.float32)
+        # Apply nonlinearity to get final target
+        g_bar = self._apply_nonlinearity(g_bar_linear)
+
+        # Compute trial label (legacy, for compatibility) - use linear g_bar for threshold
+        label = (g_bar_linear > self.task_cfg.theta).astype(jnp.float32)
 
         if self.task_cfg.label_type == "pm1":
             label = 2 * label - 1
 
-        # Build time-resolved target (now uses g_bar instead of binary label)
+        # Build time-resolved target (now uses transformed g_bar)
         y_time = self._build_target_sequence(g_bar)
 
         return {
@@ -283,6 +298,31 @@ class TemporalDecisionDataset:
             u_seq = u_seq.at[:, :2].add(noise * noise_mask)
 
         return u_seq
+
+    def _apply_nonlinearity(self, g_bar: float) -> float:
+        """
+        Apply nonlinearity to the integrated evidence g_bar.
+
+        Args:
+            g_bar: Linear integrated evidence
+
+        Returns:
+            Transformed g_bar according to task_cfg.target_nonlinearity
+        """
+        if self.task_cfg.target_nonlinearity == "none":
+            return g_bar
+        elif self.task_cfg.target_nonlinearity == "quadratic":
+            # sign(x) * x^2 - preserves sign, makes values smaller in [-1, 1]
+            return jnp.sign(g_bar) * (g_bar ** 2)
+        elif self.task_cfg.target_nonlinearity == "cubic":
+            # x^3 - strong nonlinearity, preserves sign
+            return g_bar ** 3
+        elif self.task_cfg.target_nonlinearity == "power":
+            # sign(x) * |x|^p - configurable power
+            power = self.task_cfg.target_nonlinearity_power
+            return jnp.sign(g_bar) * (jnp.abs(g_bar) ** power)
+        else:
+            raise ValueError(f"Unknown target_nonlinearity: {self.task_cfg.target_nonlinearity}")
 
     def _build_target_sequence(self, g_bar: float) -> jnp.ndarray:
         """
