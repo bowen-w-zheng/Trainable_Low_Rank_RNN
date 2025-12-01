@@ -84,21 +84,24 @@ def make_train_step(model, dataset, rnn_cfg, task_cfg, training_cfg, n_iteration
             J=trainable_params.get('J', fixed_params.get('J', None)),
         )
 
-        def single_trial(u_seq, target):
+        def single_trial(u_seq, y_target):
             _, ys = model.simulate_trial_fast(params, u_seq, dt)
 
             # Get outputs during response window
             y_resp = ys[resp_start:resp_end]
 
+            # Get target during response window
+            target_resp = y_target[resp_start:resp_end]
+
             # MSE loss: compute error at each time point in response window, then average
-            loss = jnp.mean((y_resp - target) ** 2)
+            loss = jnp.mean((y_resp - target_resp) ** 2)
 
             # Return mean prediction for evaluation
             y_hat = jnp.mean(y_resp)
 
             return y_hat, loss
 
-        y_hats, losses = jax.vmap(single_trial)(batch['u_seq'], batch['g_bars'])
+        y_hats, losses = jax.vmap(single_trial)(batch['u_seq'], batch['y_time'])
         loss = jnp.mean(losses)
 
         return loss, y_hats
@@ -142,29 +145,32 @@ def make_eval_step(model, dataset, rnn_cfg, task_cfg):
             J=trainable_params.get('J', fixed_params.get('J', None)),
         )
 
-        def single_trial(u_seq, target, context):
+        def single_trial(u_seq, y_target, context):
             _, ys = model.simulate_trial_fast(params, u_seq, dt)
 
             # Get outputs during response window
             y_resp = ys[resp_start:resp_end]
 
+            # Get target during response window
+            target_resp = y_target[resp_start:resp_end]
+
             # MSE loss: compute error at each time point in response window, then average
-            loss = jnp.mean((y_resp - target) ** 2)
+            loss = jnp.mean((y_resp - target_resp) ** 2)
 
             # Return mean prediction for evaluation
             y_hat = jnp.mean(y_resp)
 
             return y_hat, loss
 
-        y_hats, losses = jax.vmap(single_trial)(batch['u_seq'], batch['g_bars'], batch['contexts'])
+        y_hats, losses = jax.vmap(single_trial)(batch['u_seq'], batch['y_time'], batch['contexts'])
         loss = jnp.mean(losses)
 
         # Binary classification accuracy
         pred_labels = (y_hats > 0.5).astype(jnp.float32)
         accuracy = jnp.mean(pred_labels == batch['labels'])
 
-        # Compute MSE between predictions and g_bars
-        mse = jnp.mean((y_hats - batch['g_bars']) ** 2)
+        # Compute MSE between predictions and binary targets
+        mse = jnp.mean((y_hats - batch['labels']) ** 2)
 
         # Compute accuracy for different context ranges
         low_c_mask = batch['contexts'] < 0.5
