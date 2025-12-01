@@ -433,6 +433,23 @@ def train(
         fixed_params['w'] = params.w
         fixed_params['b'] = params.b
 
+    # Debug: Print what parameters are trainable
+    print("\n" + "=" * 60)
+    print("PARAMETER CONFIGURATION")
+    print("=" * 60)
+    print(f"Training mode: {training_mode}")
+    print(f"train_M: {training_cfg.train_M}")
+    print(f"train_N: {training_cfg.train_N}")
+    print(f"train_B: {training_cfg.train_B}")
+    print(f"train_w: {training_cfg.train_w}")
+    print(f"\nTrainable parameters: {list(trainable_params.keys())}")
+    print(f"Fixed parameters: {list(fixed_params.keys())}")
+    print(f"\nNumber of trainable parameter arrays: {len(trainable_params)}")
+    if len(trainable_params) == 0:
+        print("⚠️  WARNING: NO PARAMETERS ARE TRAINABLE!")
+        print("⚠️  The model will NOT learn anything during training!")
+    print("=" * 60 + "\n")
+
     # Compute iterations
     iters_per_epoch = training_cfg.n_train_trials // training_cfg.batch_size
     n_epochs = training_cfg.n_epochs
@@ -472,6 +489,10 @@ def train(
         print(f"  batch_size={training_cfg.batch_size}, lr={training_cfg.learning_rate}")
         print(f"  Plots every 10 epochs saved to: {figs_dir}")
         print()
+
+    # Store initial parameter norms for verification
+    initial_fixed_norms = {k: float(jnp.linalg.norm(v.flatten())) for k, v in fixed_params.items()}
+    initial_trainable_norms = {k: float(jnp.linalg.norm(v.flatten())) for k, v in trainable_params.items()}
 
     # Training loop
     for epoch in range(n_epochs):
@@ -534,6 +555,20 @@ def train(
                 print(f"{base_msg} | test_mse={test_mse:.4f}, test_acc={test_acc:.3f} (held-out)")
             else:
                 print(f"{base_msg} (c<0.5: acc={val_metrics['low_c_acc']:.3f}, c>=0.5: acc={val_metrics['high_c_acc']:.3f})")
+
+            # Every 10 epochs, verify parameters haven't changed if nothing is trainable
+            if len(trainable_params) == 0 and (epoch + 1) % 10 == 0:
+                current_fixed_norms = {k: float(jnp.linalg.norm(v.flatten())) for k, v in fixed_params.items()}
+                params_changed = any(abs(current_fixed_norms[k] - initial_fixed_norms[k]) > 1e-6
+                                   for k in fixed_params.keys())
+                if params_changed:
+                    print("  ⚠️  WARNING: Fixed parameters have changed! This should not happen!")
+                    for k in fixed_params.keys():
+                        delta = abs(current_fixed_norms[k] - initial_fixed_norms[k])
+                        if delta > 1e-6:
+                            print(f"     {k}: norm changed by {delta:.6e}")
+                else:
+                    print("  ✓ Verified: All fixed parameters unchanged")
 
         # Plot every 10 epochs
         if (epoch + 1) % 10 == 0 or epoch == 0:
