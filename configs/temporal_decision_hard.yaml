@@ -36,10 +36,10 @@ training:
   optimizer: adam
   grad_clip: 1.0
   training_mode: low_rank
-  train_M: false
-  train_N: false
-  train_B: false
-  train_w: false
+  train_M: true
+  train_N: true
+  train_B: true
+  train_w: true
   save_every: 1000
   checkpoint_dir: checkpoints
 
