@@ -3,8 +3,8 @@ description: Harder configuration with noise and held-out contexts for generaliz
 
 rnn:
   N: 500
-  R: 4
-  g: 2
+  R: 1
+  g: 5
   tau: 0.1
   phi: tanh
   d_in: 3
@@ -36,10 +36,10 @@ training:
   optimizer: adam
   grad_clip: 1.0
   training_mode: low_rank
-  train_M: true
-  train_N: true
-  train_B: true
-  train_w: true
+  train_M: false
+  train_N: false
+  train_B: false
+  train_w: false
   save_every: 1000
   checkpoint_dir: checkpoints
 
@@ -58,9 +58,8 @@ task:
   theta: 0.0
   label_type: binary  # Legacy field, not used for regression
   loss_type: mse  # MSE loss for regression
-  # Nonlinearity options: "none", "quadratic", "cubic", "power"
-  target_nonlinearity: cubic  # Apply cubic nonlinearity to target g_bar
-  target_nonlinearity_power: 2.0  # Used when target_nonlinearity="power"
   # Train on discrete contexts, test on held-out intermediate values
-  train_contexts: [0.0, 0.33, 0.66, 1.0]
-  test_contexts: [0.125, 0.375, 0.625, 0.875]
+  train_context_ranges: [[0.0, 0.2], [0.4, 0.6], [0.8, 1.0]]
+  test_context_ranges: [[0.2, 0.4], [0.6, 0.8]]
+  target_nonlinearity: none
+  target_nonlinearity_power: 2.0
