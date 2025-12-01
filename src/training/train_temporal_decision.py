@@ -1,4 +1,4 @@
-"""Training script for the temporal decision task (Binary Classification with Ramping)."""
+"""Training script for the temporal decision task (Binary Classification)."""
 
 import argparse
 import json
@@ -322,7 +322,7 @@ def plot_network_performance(
         true_label = float(trial['label'])
         pred_label = 1.0 if pred_val > 0.5 else 0.0
         correct = "✓" if pred_label == true_label else "✗"
-        decision = "RAMP" if true_label > 0.5 else "NO RAMP"
+        decision = "1 (Go)" if true_label > 0.5 else "0 (No-Go)"
 
         # Plot 3: Response window detail
         ax3 = axes[i, 2]
@@ -330,11 +330,11 @@ def plot_network_performance(
         ax3.plot(resp_times, y_time[resp_start:resp_end], 'k-', label='Target', linewidth=3)
         ax3.plot(resp_times, y_pred_np[resp_start:resp_end], 'b-', label='Readout', linewidth=2.5)
         ax3.axhline(0.5, color='r', linestyle='--', alpha=0.7, linewidth=1.5, label='Decision threshold')
-        ax3.set_ylabel('Binary Ramp Output')
+        ax3.set_ylabel('Binary Output')
         ax3.set_ylim(-0.1, 1.2)
         ax3.set_xlabel('Time (s)')
 
-        ax3.set_title(f'{decision} | Pred: {pred_val:.2f} ({correct})')
+        ax3.set_title(f'Target: {decision} | Pred: {pred_val:.2f} ({correct})')
         ax3.legend(loc='upper right', fontsize=8)
         ax3.grid(True, alpha=0.3)
 

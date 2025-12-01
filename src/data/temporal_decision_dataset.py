@@ -1,4 +1,4 @@
-"""Temporal decision task dataset generation (Binary Classification with Ramping)."""
+"""Temporal decision task dataset generation (Binary Classification)."""
 
 from typing import Dict, Tuple, Optional
 from dataclasses import dataclass
@@ -65,7 +65,7 @@ class TemporalDecisionTaskConfig:
 
 class TemporalDecisionDataset:
     """
-    Dataset for the temporal decision task (Binary Classification with Ramping).
+    Dataset for the temporal decision task (Binary Classification).
 
     Task description:
         - Two time-varying input features u1(t), u2(t)
@@ -74,8 +74,8 @@ class TemporalDecisionDataset:
         - For c=0: only u1 matters, g_bar = mean(u1(t))
         - For c=1: only u2 matters, g_bar = mean(u2(t))
         - For intermediate c: linear mixture, g_bar = mean((1-c)*u1(t) + c*u2(t))
-        - Binary decision: if g_bar > threshold, network should ramp from 0→1
-                          if g_bar <= threshold, network should stay at 0
+        - Binary decision: if g_bar > threshold, output = 1
+                          if g_bar <= threshold, output = 0
 
     Input channels (d_in = 3):
         - Channel 0: u1 (stimulus feature 1)
@@ -85,7 +85,7 @@ class TemporalDecisionDataset:
     Trial structure:
         - t in [0, t_stim_on): No stimulus, context present
         - t in [t_stim_on, t_stim_off]: Stimulus window (integrate evidence)
-        - t in [t_response_on, t_response_off]: Response window (binary ramp output)
+        - t in [t_response_on, t_response_off]: Response window (binary output)
     """
 
     def __init__(
@@ -336,9 +336,9 @@ class TemporalDecisionDataset:
         """
         Build time-resolved target sequence for binary classification.
 
-        Binary ramping task:
-        - If g_bar > threshold: ramp from 0 to 1 during response window
-        - If g_bar <= threshold: stay at 0
+        Binary classification task:
+        - If g_bar > threshold: constant target = 1 during response window
+        - If g_bar <= threshold: constant target = 0 during response window
 
         Args:
             g_bar: Integrated evidence (used for threshold comparison)
@@ -348,16 +348,11 @@ class TemporalDecisionDataset:
         """
         y_time = jnp.zeros(self.n_steps)
 
-        # Determine if we should ramp based on threshold
-        should_ramp = g_bar > self.task_cfg.theta
+        # Determine binary decision based on threshold
+        target_value = jnp.where(g_bar > self.task_cfg.theta, 1.0, 0.0)
 
-        # Create linear ramp from 0 to 1 during response window
-        n_response_steps = self.response_off_idx - self.response_on_idx
-        ramp = jnp.linspace(0.0, 1.0, n_response_steps)
-
-        # Set target: ramp if above threshold, 0 otherwise
-        target_values = jnp.where(should_ramp, ramp, 0.0)
-        y_time = y_time.at[self.response_on_idx:self.response_off_idx].set(target_values)
+        # Set constant target during response window
+        y_time = y_time.at[self.response_on_idx:self.response_off_idx].set(target_value)
 
         return y_time
 
@@ -611,7 +606,7 @@ def plot_single_trial(
 
     # Subplot 3: Target output
     ax3 = axes[2]
-    ax3.plot(times, y_time, 'k-', linewidth=2, label='Target (Binary Ramp)')
+    ax3.plot(times, y_time, 'k-', linewidth=2, label='Target')
     ax3.axvline(task_cfg.t_response_on, color='gray', linestyle='--', alpha=0.5)
     ax3.axvline(task_cfg.t_response_off, color='gray', linestyle='--', alpha=0.5)
     ax3.axhline(task_cfg.theta, color='r', linestyle='--', alpha=0.5, linewidth=1.5,
@@ -620,10 +615,10 @@ def plot_single_trial(
                 alpha=0.1, color='blue', label='Stimulus window')
     ax3.axvspan(task_cfg.t_response_on, task_cfg.t_response_off,
                 alpha=0.1, color='green', label='Response window')
-    ax3.set_ylabel('Binary Ramp Target')
+    ax3.set_ylabel('Binary Output')
     ax3.set_xlabel('Time (s)')
 
-    decision = "RAMP" if label > 0.5 else "NO RAMP"
+    decision = "1 (Go)" if label > 0.5 else "0 (No-Go)"
     ax3.text(0.5, 0.9, f'g_bar={g_bar:.2f} → {decision}', transform=ax3.transAxes,
             fontsize=10, fontweight='bold', ha='center', va='top',
             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
@@ -720,14 +715,14 @@ def plot_interpolation_comparison(
         # Row 3: Target
         ax3 = axes[2, col]
         ax3.plot(times, y_time, 'k-', linewidth=2, label='Target')
-        decision = "RAMP" if label > 0.5 else "NO RAMP"
+        decision = "1 (Go)" if label > 0.5 else "0 (No-Go)"
         ax3.axhline(task_cfg.theta, color='r', linestyle='--', alpha=0.5, linewidth=1.5)
         ax3.axvspan(task_cfg.t_stim_on, task_cfg.t_stim_off,
                     alpha=0.1, color='blue')
         ax3.axvspan(task_cfg.t_response_on, task_cfg.t_response_off,
                     alpha=0.1, color='green')
         if col == 0:
-            ax3.set_ylabel('Binary Ramp')
+            ax3.set_ylabel('Binary Output')
         ax3.set_xlabel('Time (s)')
 
         # Add decision annotation
@@ -737,7 +732,7 @@ def plot_interpolation_comparison(
         ax3.grid(True, alpha=0.3)
 
     # Add overall title
-    fig.suptitle(f'Binary Classification with Ramping (a1={a1:.2f}, a2={a2:.2f})',
+    fig.suptitle(f'Binary Classification Task (a1={a1:.2f}, a2={a2:.2f})',
                  fontsize=14, fontweight='bold')
 
     plt.tight_layout()
