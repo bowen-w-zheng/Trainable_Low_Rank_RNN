@@ -1,4 +1,4 @@
-"""Temporal decision task dataset generation (Interpolating Go-No-Go)."""
+"""Temporal decision task dataset generation (Binary Classification with Ramping)."""
 
 from typing import Dict, Tuple, Optional
 from dataclasses import dataclass
@@ -65,15 +65,17 @@ class TemporalDecisionTaskConfig:
 
 class TemporalDecisionDataset:
     """
-    Dataset for the temporal decision task (Evidence Integration Regression).
+    Dataset for the temporal decision task (Binary Classification with Ramping).
 
     Task description:
         - Two time-varying input features u1(t), u2(t)
         - Context cue c determines which feature is relevant
-        - Network outputs g_bar: the integrated evidence over stimulus window
+        - Network computes g_bar: the integrated evidence over stimulus window
         - For c=0: only u1 matters, g_bar = mean(u1(t))
         - For c=1: only u2 matters, g_bar = mean(u2(t))
         - For intermediate c: linear mixture, g_bar = mean((1-c)*u1(t) + c*u2(t))
+        - Binary decision: if g_bar > threshold, network should ramp from 0→1
+                          if g_bar <= threshold, network should stay at 0
 
     Input channels (d_in = 3):
         - Channel 0: u1 (stimulus feature 1)
@@ -83,7 +85,7 @@ class TemporalDecisionDataset:
     Trial structure:
         - t in [0, t_stim_on): No stimulus, context present
         - t in [t_stim_on, t_stim_off]: Stimulus window (integrate evidence)
-        - t in [t_response_on, t_response_off]: Response window (output g_bar)
+        - t in [t_response_on, t_response_off]: Response window (binary ramp output)
     """
 
     def __init__(
@@ -332,20 +334,30 @@ class TemporalDecisionDataset:
 
     def _build_target_sequence(self, g_bar: float) -> jnp.ndarray:
         """
-        Build time-resolved target sequence.
+        Build time-resolved target sequence for binary classification.
 
-        Target is 0 before/during stimulus, and g_bar during response window.
+        Binary ramping task:
+        - If g_bar > threshold: ramp from 0 to 1 during response window
+        - If g_bar <= threshold: stay at 0
 
         Args:
-            g_bar: Integrated evidence (target value for regression)
+            g_bar: Integrated evidence (used for threshold comparison)
 
         Returns:
             y_time: Target sequence (n_steps,)
         """
         y_time = jnp.zeros(self.n_steps)
 
-        # Set target to g_bar in response window
-        y_time = y_time.at[self.response_on_idx:self.response_off_idx].set(g_bar)
+        # Determine if we should ramp based on threshold
+        should_ramp = g_bar > self.task_cfg.theta
+
+        # Create linear ramp from 0 to 1 during response window
+        n_response_steps = self.response_off_idx - self.response_on_idx
+        ramp = jnp.linspace(0.0, 1.0, n_response_steps)
+
+        # Set target: ramp if above threshold, 0 otherwise
+        target_values = jnp.where(should_ramp, ramp, 0.0)
+        y_time = y_time.at[self.response_on_idx:self.response_off_idx].set(target_values)
 
         return y_time
 
@@ -599,20 +611,25 @@ def plot_single_trial(
 
     # Subplot 3: Target output
     ax3 = axes[2]
-    ax3.plot(times, y_time, 'k-', linewidth=2, label='Target')
+    ax3.plot(times, y_time, 'k-', linewidth=2, label='Target (Binary Ramp)')
     ax3.axvline(task_cfg.t_response_on, color='gray', linestyle='--', alpha=0.5)
     ax3.axvline(task_cfg.t_response_off, color='gray', linestyle='--', alpha=0.5)
-    ax3.axhline(g_bar, color='m', linestyle=':', alpha=0.7, linewidth=2,
-                label=f'g_bar={g_bar:.2f}')
+    ax3.axhline(task_cfg.theta, color='r', linestyle='--', alpha=0.5, linewidth=1.5,
+                label=f'Threshold θ={task_cfg.theta:.2f}')
     ax3.axvspan(task_cfg.t_stim_on, task_cfg.t_stim_off,
                 alpha=0.1, color='blue', label='Stimulus window')
     ax3.axvspan(task_cfg.t_response_on, task_cfg.t_response_off,
                 alpha=0.1, color='green', label='Response window')
-    ax3.set_ylabel('Target (g_bar)')
+    ax3.set_ylabel('Binary Ramp Target')
     ax3.set_xlabel('Time (s)')
 
-    ax3.legend(loc='upper right')
-    ax3.set_title('Target Output (Integrated Evidence)')
+    decision = "RAMP" if label > 0.5 else "NO RAMP"
+    ax3.text(0.5, 0.9, f'g_bar={g_bar:.2f} → {decision}', transform=ax3.transAxes,
+            fontsize=10, fontweight='bold', ha='center', va='top',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    ax3.legend(loc='upper right', fontsize=8)
+    ax3.set_title('Target Output (Binary Decision)')
     ax3.grid(True, alpha=0.3)
 
     plt.tight_layout()
@@ -703,23 +720,24 @@ def plot_interpolation_comparison(
         # Row 3: Target
         ax3 = axes[2, col]
         ax3.plot(times, y_time, 'k-', linewidth=2, label='Target')
-        ax3.axhline(g_bar, color='m', linestyle=':', alpha=0.7, linewidth=2)
+        decision = "RAMP" if label > 0.5 else "NO RAMP"
+        ax3.axhline(task_cfg.theta, color='r', linestyle='--', alpha=0.5, linewidth=1.5)
         ax3.axvspan(task_cfg.t_stim_on, task_cfg.t_stim_off,
                     alpha=0.1, color='blue')
         ax3.axvspan(task_cfg.t_response_on, task_cfg.t_response_off,
                     alpha=0.1, color='green')
         if col == 0:
-            ax3.set_ylabel('Target (g_bar)')
+            ax3.set_ylabel('Binary Ramp')
         ax3.set_xlabel('Time (s)')
 
-        # Add g_bar value annotation
-        ax3.text(0.5, 0.9, f'Target: {g_bar:.2f}', transform=ax3.transAxes,
-                fontsize=10, fontweight='bold', ha='center', va='top',
+        # Add decision annotation
+        ax3.text(0.5, 0.9, f'g_bar={g_bar:.2f} → {decision}', transform=ax3.transAxes,
+                fontsize=9, fontweight='bold', ha='center', va='top',
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
         ax3.grid(True, alpha=0.3)
 
     # Add overall title
-    fig.suptitle(f'Evidence Integration Regression Task (a1={a1:.2f}, a2={a2:.2f})',
+    fig.suptitle(f'Binary Classification with Ramping (a1={a1:.2f}, a2={a2:.2f})',
                  fontsize=14, fontweight='bold')
 
     plt.tight_layout()
